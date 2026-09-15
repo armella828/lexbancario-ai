@@ -1,0 +1,23 @@
+# Entornos virtuales
+venv/
+env/
+.venv/
+__pycache__/
+*.pyc
+
+# Variables de entorno y credenciales (NUNCA SUBIR)
+.env
+*.env.local
+
+# Archivos pesados y temporales
+documentos_pdf/
+documentos_u/
+*.pdf
+*.png
+*.jpg
+*.jpeg
+
+# Logs y base de datos local si hubiera
+*.log
+.DS_Store
+.vscode/
