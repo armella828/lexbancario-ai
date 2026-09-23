@@ -1,6 +1,8 @@
 import os
+import socket
 import time
 from typing import List, Optional
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -53,19 +55,40 @@ class ConsultaResponse(BaseModel):
     respuesta: str
     fuentes: List[FuenteNormativa]
 
+def reintentar(fn, intentos=3, espera_base=3):
+    """Reintenta operaciones de red ante errores transitorios (DNS, conexion, timeouts, 429)."""
+    ultimo_error = None
+    for i in range(intentos):
+        try:
+            return fn()
+        except Exception as e:
+            ultimo_error = e
+            err_str = str(e)
+            es_transitorio = (
+                isinstance(e, (socket.gaierror, httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout))
+                or "429" in err_str
+                or "RESOURCE_EXHAUSTED" in err_str
+                or "Name or service not known" in err_str
+            )
+            if es_transitorio:
+                time.sleep(espera_base * (i + 1))
+                continue
+            break
+    raise ultimo_error
+
 def buscar_contexto(pregunta: str, top_k: int, match_threshold: float):
-    res_emb = ai_client.models.embed_content(
+    res_emb = reintentar(lambda: ai_client.models.embed_content(
         model=MODEL_EMBEDDING,
         contents=[pregunta],
         config=types.EmbedContentConfig(output_dimensionality=768)
-    )
+    ))
     query_vector = res_emb.embeddings[0].values
 
-    rpc_res = supabase.rpc("match_normativa", {
+    rpc_res = reintentar(lambda: supabase.rpc("match_normativa", {
         "query_embedding": query_vector,
         "match_threshold": match_threshold,
         "match_count": top_k
-    }).execute()
+    }).execute())
 
     return rpc_res.data or []
 

@@ -9,6 +9,9 @@ services:
       - "8000:8000"
     env_file:
       - .env
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     networks:
       - rag_net
 
@@ -24,6 +27,9 @@ services:
       - backend
     environment:
       - API_URL=http://backend:8000/api/consultar
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     env_file:
       - .env
     networks:
