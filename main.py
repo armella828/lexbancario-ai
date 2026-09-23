@@ -24,7 +24,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 MODEL_EMBEDDING = "models/gemini-embedding-001"
-MODELOS_GENERACION = ["gemini-3.6-flash", "gemini-3-flash-preview"]
+MODELOS_GENERACION = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3-flash-preview", "gemini-flash-latest"]
 
 app = FastAPI(
     title="API RAG Normativa Bancaria - ASFI / Banco Unión",
@@ -93,25 +93,31 @@ def buscar_contexto(pregunta: str, top_k: int, match_threshold: float):
     return rpc_res.data or []
 
 def generar_con_respaldo(prompt: str) -> str:
-    """Genera respuesta con Gemini aplicando reintentos y fallback a modelo alternativo si hay 503."""
+    """Genera respuesta con Gemini recorriendo modelos de respaldo ante 503/429."""
     ultimo_error = None
     for modelo in MODELOS_GENERACION:
-        for intento in range(2):
-            try:
-                res = ai_client.models.generate_content(
-                    model=modelo,
-                    contents=prompt
-                )
+        try:
+            res = ai_client.models.generate_content(
+                model=modelo,
+                contents=prompt,
+                config={"max_output_tokens": 1024}
+            )
+            if not res.text and res.candidates and res.candidates[0].content:
+                res.text = "".join(p.text or "" for p in res.candidates[0].content.parts)
+            if res.text and res.text.strip():
                 return res.text
-            except Exception as e:
-                ultimo_error = e
-                err_str = str(e)
-                if "503" in err_str or "UNAVAILABLE" in err_str:
-                    time.sleep(2)
-                    continue
-                else:
-                    break
-    raise HTTPException(status_code=503, detail=f"Servicio LLM no disponible temporalmente: {ultimo_error}")
+            ultimo_error = ValueError("Respuesta vacia del modelo")
+        except Exception as e:
+            ultimo_error = e
+            err_str = str(e)
+            if any(k in err_str for k in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "quota")):
+                time.sleep(2)
+                continue
+            break
+    raise HTTPException(
+        status_code=503,
+        detail="Google AI Studio no respondio (cuota diaria agotada o alta demanda en los modelos). Reintenta en unos segundos o con otra API key."
+    )
 
 @app.get("/")
 def estado():
