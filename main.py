@@ -21,7 +21,10 @@ if not all([SUPABASE_URL, SUPABASE_KEY, GEMINI_API_KEY]):
     raise RuntimeError("Faltan variables de entorno requeridas en el archivo .env")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-ai_client = genai.Client(api_key=GEMINI_API_KEY)
+ai_client = genai.Client(
+    api_key=GEMINI_API_KEY,
+    http_options=types.HttpOptions(timeout=20_000)
+)
 
 MODEL_EMBEDDING = "models/gemini-embedding-001"
 MODELOS_GENERACION = ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3-flash-preview", "gemini-flash-latest"]
