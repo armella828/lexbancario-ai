@@ -15,7 +15,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 MODEL_EMBEDDING = "models/gemini-embedding-001"
-MODEL_GENERACION = "gemini-2.5-flash"
+MODEL_GENERACION = "gemini-3.6-flash"
 
 def buscar_contexto(pregunta: str, top_k: int = 4):
     """Genera el embedding de la consulta y llama a la función RPC en Supabase."""

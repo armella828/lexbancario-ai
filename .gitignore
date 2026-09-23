@@ -19,5 +19,17 @@ documentos_u/
 
 # Logs y base de datos local si hubiera
 *.log
+error_build*.txt
 .DS_Store
 .vscode/
+
+# Artefactos accidentales de terminal
+[internal]
+CACHED
+ERROR
+See
+transferring
+reading
+resolve
+=
+26.2.1

@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import requests
 
@@ -8,7 +9,7 @@ st.set_page_config(
     layout="wide"
 )
 
-API_URL = "http://127.0.0.1:8000/api/consultar"
+API_URL = os.getenv("API_URL", "http://127.0.0.1:8000/api/consultar")
 
 # Barra lateral con controles
 with st.sidebar:
