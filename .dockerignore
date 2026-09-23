@@ -1,0 +1,12 @@
+venv/
+.git/
+__pycache__/
+*.pyc
+.env
+error_build*.txt
+*.pdf
+*.png
+*.jpg
+*.jpeg
+documentos_pdf/
+documentos_u/
