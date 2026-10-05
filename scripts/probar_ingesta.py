@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from dotenv import load_dotenv
 from supabase import create_client
 
+from rag.embeddings import CuotaAgotada
 from rag.pipeline import ingestar
 
 load_dotenv()
@@ -115,14 +116,24 @@ def main():
           f"(concurrencia={args.concurrencia})")
 
     try:
-        resultado = ingestar(
-            urls=urls,
-            coleccion_id=COLECCION,
-            chunk_size=args.chunk_size,
-            chunk_overlap=args.chunk_overlap,
-            concurrencia=args.concurrencia,
-            procesos_chunking=args.concurrencia,
-        )
+        try:
+            resultado = ingestar(
+                urls=urls,
+                coleccion_id=COLECCION,
+                chunk_size=args.chunk_size,
+                chunk_overlap=args.chunk_overlap,
+                concurrencia=args.concurrencia,
+                procesos_chunking=args.concurrencia,
+            )
+        except CuotaAgotada as exc:
+            # Sin cuota de embeddings no se puede completar la ingesta. Es
+            # una condicion del entorno, no un fallo del pipeline.
+            print("\n" + "=" * 72)
+            print("[--] PRUEBA OMITIDA: cuota de embeddings agotada.")
+            print("=" * 72)
+            print(f"     {exc}")
+            print("\n     Reejecutar cuando la cuota se renueve.")
+            return 0
 
         resumen = resultado.resumen()
         print("\n" + "=" * 72)
