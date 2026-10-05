@@ -20,6 +20,10 @@ documentos_u/
 # Respaldos de base de datos (contienen datos reales, nunca al repo)
 respaldos/
 
+# Cache de embeddings: son datos derivados de una API de pago cuota. No
+# pertenece al repo, y ademas versionarla haria el repositorio enorme.
+cache_embeddings/
+
 # Resultados de benchmark regenerables (si se versionan, van aqui)
 !resultados/*.png
 

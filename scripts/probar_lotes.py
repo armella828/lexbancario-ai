@@ -69,11 +69,12 @@ class ClienteFalso:
             error = self.fallos.pop(0)
             if error is not None:
                 raise error
-        vectores = [VectorFalso(int(t.split("-")[1])) for t in contents]
+        vectores = [VectorFalso(indice_de(t)) for t in contents]
         return RespuestaFalsa(vectores)
 
 
 def indice_de(texto):
+    """Primer componente del texto, usado para codificar el vector falso."""
     return int(texto.split("-")[1])
 
 
@@ -252,7 +253,92 @@ try:
     comprobar("Un 400 consume una sola llamada", len(falso.llamadas) == 1, f"-> {len(falso.llamadas)}")
 
     # ------------------------------------------------------------- cadencia
-    print("\n[10] Limitador de cadencia")
+    print("\n[10] Cache de embeddings")
+    import shutil
+    import tempfile
+
+    from rag.embeddings import CacheEmbeddings
+
+    temporal = tempfile.mkdtemp(prefix="cache_test_")
+    ruta = os.path.join(temporal, "cache.json")
+
+    calls = {"n": 0}
+
+    class ClienteContador(ClienteFalso):
+        def embed_content(self, model, contents, config):
+            calls["n"] += 1
+            return super().embed_content(model, contents, config)
+
+    try:
+        cliente = ClienteContador()
+        cache = CacheEmbeddings(ruta=ruta).cargar()
+
+        textos_cache = [f"texto-{i}" for i in range(25)]
+        v1 = generar_embeddings(textos_cache, tamano_lote=10, cliente_ai=cliente,
+                                cache=cache, limitador=LimitadorCadencia(Rápido))
+        comprobar("Primera pasada consume requests", calls["n"] == 3, f"-> {calls['n']}")
+        comprobar("La primera pasada devuelve un vector por texto", len(v1) == 25)
+        comprobar("25 textos unicos se guardan", len(cache._vectores) == 25,
+                  f"-> {len(cache._vectores)}")
+
+        # Segunda pasada: identicos textos, debe salir de disco.
+        calls["n"] = 0
+        v2 = generar_embeddings(textos_cache, tamano_lote=10, cliente_ai=cliente,
+                                cache=cache, limitador=LimitadorCadencia(Rápido))
+        comprobar("La segunda pasada NO llama a la API", calls["n"] == 0, f"-> {calls['n']}")
+        comprobar("La segunda pasada devuelve los mismos vectores", v1 == v2)
+        comprobar("Todos los vectores vienen de la cache", cache.fallos == 0)
+
+        # Reordenar y repetir textos no puede romper el orden de salida.
+        revueltos = list(reversed(textos_cache)) + ["texto-0", "texto-5"]
+        v3 = generar_embeddings(revueltos, tamano_lote=7, cliente_ai=cliente,
+                                cache=cache, limitador=LimitadorCadencia(Rápido))
+        comprobar("Textos repetidos y reordenados: 0 requests extra", calls["n"] == 0,
+                  f"-> {calls['n']}")
+        comprobar("El orden de salida sigue a la entrada", len(v3) == len(revueltos)
+                  and [v[0] for v in v3[:3]] == [24.0, 23.0, 22.0],
+                  f"-> {[v[0] for v in v3[:3]]}")
+        comprobar("El texto repetido devuelve el mismo vector",
+                  v3[-2][0] == 0.0 and v3[-1][0] == 5.0)
+
+        # Texto nuevo: solo ese debe consumirse. Se usa un indice valido
+        # para el vector falso, que solo sabe decodificar numeros.
+        calls["n"] = 0
+        texto_nuevo = "texto-99"
+        v4 = generar_embeddings(textos_cache + [texto_nuevo],
+                                tamano_lote=10, cliente_ai=cliente, cache=cache,
+                                limitador=LimitadorCadencia(Rápido))
+        comprobar("Un texto nuevo consume exactamente 1 request", calls["n"] == 1,
+                  f"-> {calls['n']}")
+        comprobar("El texto nuevo si se vectoriza", len(v4) == 26)
+        comprobar("El texto nuevo queda en su posicion",
+                  v4[-1][0] == 99.0, f"-> {v4[-1][0]}")
+
+        # Persistencia entre instancias.
+        otra = CacheEmbeddings(ruta=ruta).cargar()
+        comprobar("La cache se relee de disco", len(otra._vectores) == 26,
+                  f"-> {len(otra._vectores)}")
+        calls["n"] = 0
+        generar_embeddings(textos_cache, tamano_lote=10, cliente_ai=cliente,
+                           cache=otra, limitador=LimitadorCadencia(Rápido))
+        comprobar("Tras releer de disco sigue sin llamar a la API", calls["n"] == 0,
+                  f"-> {calls['n']}")
+
+        # Una cache de otro modelo no debe servir vectores.
+        incompatible = CacheEmbeddings(ruta=ruta, modelo="otro-modelo").cargar()
+        comprobar("Una cache de otro modelo se descarta",
+                  len(incompatible._vectores) == 0)
+
+        # Cache corrupta: se ignora, no rompe.
+        with open(ruta, "w", encoding="utf-8") as f:
+            f.write("{esto no es json")
+        rota = CacheEmbeddings(ruta=ruta).cargar()
+        comprobar("Una cache corrupta se ignora sin fallar",
+                  len(rota._vectores) == 0)
+    finally:
+        shutil.rmtree(temporal, ignore_errors=True)
+
+    print("\n[11] Limitador de cadencia")
     pausas = []
     con_sleep_falso(lambda s: pausas.append(s))
     lim = LimitadorCadencia(60)          # 1 request por segundo
@@ -271,7 +357,7 @@ try:
         lim.esperar_turno()
     comprobar("Cadencia alta no introduce esperas", lim.esperas < 1e-3, f"-> {lim.esperas:.6f}s")
 
-    print("\n[11] El limitador es seguro entre hilos")
+    print("\n[12] El limitador es seguro entre hilos")
     lim = LimitadorCadencia(60)
     import threading
     hilos = [threading.Thread(target=lambda: [lim.esperar_turno() for _ in range(3)])
