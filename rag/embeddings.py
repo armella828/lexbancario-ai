@@ -16,13 +16,22 @@ Se combinan tres mecanismos:
 3. Backoff exponencial con jitter: si aun asi llega un 429 o un 503, se
    reintenta esperando el `retryDelay` que indica la propia API.
 """
+import hashlib
+import json
+import os
 import random
 import re
 import threading
 import time
-from typing import List, Optional
+from typing import Dict, List, Optional
 
-from .clients import ENTORNO, MODEL_EMBEDDING, config_embeddings, config_entero
+from .clients import (
+    DIMENSIONES_EMBEDDING,
+    ENTORNO,
+    MODEL_EMBEDDING,
+    config_embeddings,
+    config_entero,
+)
 
 # Cadencia por defecto: 80 requests/min, un 20% por debajo del limite duro
 # de 100 r/min del nivel gratuito. El margen absorbe la facturacion de
@@ -201,6 +210,122 @@ def embedir_lote(
     )
 
 
+class CacheEmbeddings:
+    """Embeddings guardados en disco, indexados por hash del contenido.
+
+    Existe por una razon concreta: el nivel gratuito de Google AI Studio
+    permite 1000 requests de embeddings al dia. Un benchmark que repita el
+    mismo corpus en varias replicas agotaria la cuota en la primera
+    replica y las siguientes medirian backoff, no concurrencia.
+
+    Con la cache, solo la primera pasada paga requests; las demas leen de
+    disco. El vector guardado es siempre el mismo para el mismo texto,
+    porque el modelo es determinista, de modo que repetir la medicion no
+    cambia el resultado.
+
+    La clave incluye el modelo y la dimension: si alguno cambia, la clave
+    cambia y el vector se recalcula, en vez de servir un vector obsoleto
+    de otra configuracion.
+    """
+
+    VERSION = 1
+
+    def __init__(
+        self,
+        ruta: Optional[str] = None,
+        modelo: str = MODEL_EMBEDDING,
+        dimension: int = DIMENSIONES_EMBEDDING,
+    ):
+        self.ruta = ruta or os.getenv(
+            "EMBEDDINGS_CACHE", "cache_embeddings/embeddings.json"
+        )
+        self.modelo = modelo
+        self.dimension = dimension
+        self._vectores: Dict[str, list] = {}
+        self._lock = threading.Lock()
+        self.aciertos = 0
+        self.fallos = 0
+        self.escrituras = 0
+        self.peticiones_evitadas = 0
+
+    def _clave(self, texto: str) -> str:
+        crudo = f"{self.modelo}|{self.dimension}|{texto}".encode("utf-8")
+        return hashlib.sha256(crudo).hexdigest()
+
+    def cargar(self):
+        """Lee la cache de disco. Una cache corrupta se ignora, no rompe."""
+        if not os.path.exists(self.ruta):
+            return self
+        try:
+            with open(self.ruta, encoding="utf-8") as f:
+                datos = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return self
+        if (
+            datos.get("version") != self.VERSION
+            or datos.get("modelo") != self.modelo
+            or datos.get("dimension") != self.dimension
+        ):
+            # Configuracion distinta: no sirven estos vectores.
+            return self
+        self._vectores = datos.get("vectores", {})
+        return self
+
+    def guardar(self):
+        os.makedirs(os.path.dirname(self.ruta) or ".", exist_ok=True)
+        temporal = f"{self.ruta}.tmp"
+        with open(temporal, "w", encoding="utf-8") as f:
+            json.dump({
+                "version": self.VERSION,
+                "modelo": self.modelo,
+                "dimension": self.dimension,
+                "vectores": self._vectores,
+            }, f)
+        # Sustitucion atomica: si el proceso muere a mitad, la cache
+        # anterior sigue intacta en lugar de quedar truncada.
+        os.replace(temporal, self.ruta)
+        self.escrituras += 1
+        return self
+
+    def obtener(self, texto: str) -> Optional[list]:
+        clave = self._clave(texto)
+        vector = self._vectores.get(clave)
+        if vector is None:
+            self.fallos += 1
+        else:
+            self.aciertos += 1
+        return vector
+
+    def almacenar(self, texto: str, vector: list):
+        with self._lock:
+            self._vectores[self._clave(texto)] = list(vector)
+
+    def faltan(self, textos: List[str]) -> List[str]:
+        """Devuelve los textos sin vector, en orden y sin repetir.
+
+        Deduplicar importa: si el mismo texto aparece en varios lotes,
+        pedirlo una vez por lote multiplicaria el consumo de cuota sin
+        aportar nada.
+        """
+        faltan = []
+        vistos = set()
+        for texto in textos:
+            clave = self._clave(texto)
+            if clave in self._vectores or clave in vistos:
+                continue
+            vistos.add(clave)
+            faltan.append(texto)
+        return faltan
+
+    def resumen(self) -> dict:
+        return {
+            "aciertos": self.aciertos,
+            "fallos": self.fallos,
+            "vectores": len(self._vectores),
+            "peticiones_evitadas": self.peticiones_evitadas,
+        }
+
+
 def lotes(textos: List[str], tamano: int = TAMANO_LOTE_DEFAULT):
     """Divide la lista en lotes de `tamano` elementos."""
     for i in range(0, len(textos), tamano):
@@ -213,19 +338,42 @@ def generar_embeddings(
     limitador: Optional[LimitadorCadencia] = None,
     al_progresar=None,
     cliente_ai=None,
+    cache: Optional["CacheEmbeddings"] = None,
 ) -> List[list]:
     """Genera embeddings de `textos` por lotes, con limite de cuota global.
 
     Se devuelve un solo limitador para toda la llamada: asi la cadencia se
     aplica sobre el total de requests, no por lote.
+
+    Si se pasa `cache`, solo se piden a la API los textos que no estaban
+    guardados. El orden de la salida sigue siendo el de `textos`.
     """
     limitador = limitador or LimitadorCadencia()
     tamano_lote = tamano_lote or tamano_lote_configurado()
-    vectores: List[list] = []
 
-    for indice, lote in enumerate(lotes(textos, tamano_lote), start=1):
+    if cache is None:
+        vectores: List[list] = []
+        for indice, lote in enumerate(lotes(textos, tamano_lote), start=1):
+            if al_progresar:
+                al_progresar(indice, lote)
+            vectores.extend(embedir_lote(lote, limitador, cliente_ai))
+        return vectores
+
+    faltantes = cache.faltan(textos)
+    nuevos: Dict[str, list] = {}
+    for indice, lote in enumerate(lotes(faltantes, tamano_lote), start=1):
         if al_progresar:
             al_progresar(indice, lote)
-        vectores.extend(embedir_lote(lote, limitador, cliente_ai))
+        for texto, vector in zip(lote, embedir_lote(lote, limitador, cliente_ai)):
+            nuevos[texto] = vector
+            cache.almacenar(texto, vector)
 
-    return vectores
+    resueltos = []
+    for texto in textos:
+        vector = nuevos.get(texto)
+        if vector is None:
+            vector = cache.obtener(texto)
+        resueltos.append(vector)
+    cache.peticiones_evitadas = len(textos) - len(faltantes)
+    cache.guardar()
+    return resueltos
