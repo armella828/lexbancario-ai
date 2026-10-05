@@ -5,85 +5,90 @@ distintos, y comprueba que una busqueda vectorial sobre cada una nunca
 devuelve fragmentos de la otra.
 
 Colecciones de prueba:
-  - `demo_tributaria`  : normativa tributaria (GAI, GUB, IUE)
-  - `demo_bancaria`    : normativa bancaria (RNSF, capital,Provisioning)
+  - demo_tributaria : normativa tributaria (capital minimo, reserva)
+  - demo_bancaria   : normativa bancaria (provisioning, capital exigible)
 
-Comparten terminologia casi identica ("capital minimo", "reserva",
-"provisionamiento") para forzar la confusion semantica: si el filtro por
-coleccion no funciona, estos son justo los fragmentos que se colarian.
+Comparten terminologia casi identica para forzar la confusion semantica:
+si el filtro por coleccion no funciona, estos son justo los fragmentos que
+se colarian.
 
 Uso: python scripts/test_aislamiento.py
+Sale con codigo 0 si PASS, 1 si FAIL.
 """
 import os
 import sys
 import uuid
 
 from dotenv import load_dotenv
-from supabase import create_client
 from google import genai
 from google.genai import types
+from supabase import create_client
 
 load_dotenv()
-
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 TABLA = "normativa_bancaria"
 RPC = "match_normativa_coleccion"
 MODEL_EMBEDDING = "models/gemini-embedding-001"
 DIMENSIONES = 768
-COLECCION_A = "demo_tributaria"
-COLECCION_B = "demo_bancaria"
-COLECCION_INEXISTENTE = "demo_inexistente_xyz"
+
+COLECCION_TRIBUTARIA = "demo_tributaria"
+COLECCION_BANCARIA = "demo_bancaria"
+COLECCION_FANTASMA = "demo_inexistente_xyz"
 
 # Dominios opuestos con lexico casi identico.
-FRAGMENTOS_A = [
-    "El capital minimo del regimen tributario debe adicionarse a las reservas.",
-    "La reserva minima tributaria se calculates sobre el capital exigido.",
-    "El provisioning de cartera sebirn para fines de la reserva legal.",
-]
-FRAGMENTOS_B = [
-    "El capital minimo exigible a la entidad financiera cubre el riesgo deProvisioning.",
-    "La reserva minima del capital regularization se mide contra el capital minimo.",
-    "El provisioning de la cartera crediticia alimenta la reserva de capital.",
+FRAGMENTOS_TRIBUTARIOS = [
+    "El capital mínimo del régimen tributario debe adicionarse a las reservas "
+    "de la entidad.",
+    "La reserva mínima tributaria se calcula sobre el capital exigido por la norma.",
+    "El provisioning de cartera se computa para fines de la reserva legal del impuesto.",
 ]
 
-CLIENTE_SUPABASE = None
-CLIENTE_AI = None
-TAG = None
+FRAGMENTOS_BANCARIOS = [
+    "El capital mínimo exigible a la entidad financiera cubre el riesgo de provisioning.",
+    "La reserva mínima del capital regulatorio se mide contra el capital mínimo solicitado.",
+    "El provisioning de la cartera crediticia alimenta la reserva de capital del banco.",
+]
 
 
-def init_clientes():
-    global CLIENTE_SUPABASE, CLIENTE_AI
-    if CLIENTE_SUPABASE is None:
-        CLIENTE_SUPABASE = create_client(SUPABASE_URL, SUPABASE_KEY)
-    if CLIENTE_AI is None:
-        CLIENTE_AI = genai.Client(api_key=GEMINI_API_KEY)
-    return CLIENTE_SUPABASE, CLIENTE_AI
+class Entorno:
+    """Agrupa los clientes para no depender de variables globales mutables."""
+
+    def __init__(self):
+        self.supa = create_client(
+            os.getenv("SUPABASE_URL"),
+            os.getenv("SUPABASE_SERVICE_ROLE_KEY"),
+        )
+        self.ai = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+    def embedir(self, textos):
+        res = self.ai.models.embed_content(
+            model=MODEL_EMBEDDING,
+            contents=textos,
+            config=types.EmbedContentConfig(output_dimensionality=DIMENSIONES),
+        )
+        return [e.values for e in res.embeddings]
+
+    def consultar(self, coleccion, vector, top_k=10, umbral=0.0):
+        resp = self.supa.rpc(RPC, {
+            "query_embedding": vector,
+            "match_threshold": umbral,
+            "match_count": top_k,
+            "p_coleccion_id": coleccion,
+        }).execute()
+        return resp.data or []
 
 
-def embedir(textos):
-    _, ai = init_clientes()
-    res = ai.models.embed_content(
-        model=MODEL_EMBEDDING,
-        contents=textos,
-        config=types.EmbedContentConfig(output_dimensionality=DIMENSIONES),
-    )
-    return [e.values for e in res.embeddings]
-
-
-def sembrar():
+def sembrar(env, tag):
     """Inserta los fragmentos de ambas colecciones y devuelve sus ids."""
-    supa, _ = init_clientes()
-    textos = FRAGMENTOS_A + FRAGMENTOS_B
-    vectores = embedir(textos)
+    textos = FRAGMENTOS_TRIBUTARIOS + FRAGMENTOS_BANCARIOS
+    vectores = env.embedir(textos)
+    corte = len(FRAGMENTOS_TRIBUTARIOS)
 
     filas = []
     for idx, texto in enumerate(textos):
-        coleccion = COLECCION_A if idx < len(FRAGMENTOS_A) else COLECCION_B
+        coleccion = COLECCION_TRIBUTARIA if idx < corte else COLECCION_BANCARIA
         filas.append({
-            "documento_origen": f"TEST_{TAG}.pdf",
+            "documento_origen": f"TEST_{tag}.pdf",
             "organismo": "DEMO",
             "tipo_norma": "Circular / Resolucion",
             "jerarquia": "DEMO",
@@ -93,120 +98,103 @@ def sembrar():
             "embedding": vectores[idx],
         })
 
-    resp = supa.table(TABLA).insert(filas).execute()
+    resp = env.supa.table(TABLA).insert(filas).execute()
     ids = [f["id"] for f in resp.data]
-    print(f"[i] Sembradas {len(ids)} filas de prueba en '{COLECCION_A}' y '{COLECCION_B}'")
+    print(f"[i] Sembradas {len(ids)} filas de prueba "
+          f"({corte} '{COLECCION_TRIBUTARIA}' + {len(textos) - corte} '{COLECCION_BANCARIA}')")
     return ids
 
 
-def limpiar(ids):
-    supa, _ = init_clientes()
+def limpiar(env, ids):
     if not ids:
         return
-    supa.table(TABLA).delete().in_("id", ids).execute()
+    env.supa.table(TABLA).delete().in_("id", ids).execute()
     print(f"[i] Filas de prueba eliminadas ({len(ids)})")
 
 
-def consultar(coleccion, vector, top_k=10, umbral=0.0):
-    """Ejecuta la RPC aislada y devuelve las filas devueltas."""
-    supa, _ = init_clientes()
-    resp = supa.rpc(RPC, {
-        "query_embedding": vector,
-        "match_threshold": umbral,
-        "match_count": top_k,
-        "p_coleccion_id": coleccion,
-    }).execute()
-    return resp.data or []
-
-
 def intrusos(filas, coleccion_esperada):
-    """Filas cuya coleccion_id no es la solicitada: contaminacion."""
+    """Filas cuya coleccion_id no es la solicitada: contaminacion cruzada."""
     return [f for f in filas if f.get("coleccion_id") != coleccion_esperada]
 
 
+def detalle(filas):
+    for f in filas:
+        sim = f.get("similarity")
+        sim_txt = f"{sim:.4f}" if isinstance(sim, (int, float)) else "n/d"
+        print(f"  [{str(f.get('coleccion_id')):<18}] sim={sim_txt}  "
+              f"{str(f.get('contenido', ''))[:48]}")
+
+
 def main():
-    global TAG
-    TAG = uuid.uuid4().hex[:8]
+    env = Entorno()
+    tag = uuid.uuid4().hex[:8]
     ids = None
     try:
-        ids = sembrar()
-        vector = embedir(["capital minimo y reserva"])[0]
+        ids = sembrar(env, tag)
+        vector = env.embedir(["capital minimo y reserva"])[0]
 
-        filas_a = consultar(COLECCION_A, vector)
-        filas_b = consultar(COLECCION_B, vector)
-        control = consultar(COLLECCION_INEXISTENTE, vector)
+        filas_tributaria = env.consultar(COLECCION_TRIBUTARIA, vector)
+        filas_bancaria = env.consultar(COLECCION_BANCARIA, vector)
+        filas_fantasma = env.consultar(COLECCION_FANTASMA, vector)
 
-        intrusos_a = intrusos(filas_a, COLECCION_A)
-        intrusos_b = intrusos(filas_b, COLECCION_B)
-        intrusos_control = intrusos(control, COLECCION_INEXISTENTE)
+        intrusos_t = intrusos(filas_tributaria, COLECCION_TRIBUTARIA)
+        intrusos_b = intrusos(filas_bancaria, COLECCION_BANCARIA)
 
-        print("\n" + "=" * 68)
+        print("\n" + "=" * 70)
         print("PRUEBA DE AISLAMIENTO MULTI-TENANT")
-        print("=" * 68)
-        print(f"Coleccion solicitada : {COLECCION_A}")
-        print(f"  fragmentos devueltos         : {len(filas_a)}")
-        print(f"  intrusos de otra coleccion   : {len(intrusos_a)}")
-        print(f"Coleccion solicitada : {COLECCION_B}")
-        print(f"  fragmentos devueltos         : {len(filas_b)}")
-        print(f"  intrusos de otra coleccion   : {len(intrusos_b)}")
-        print("-" * 68)
-        print(f"Control (coleccion inexistente): {len(control)} fragmentos")
-        print("-" * 68)
+        print("=" * 70)
+        print(f"Consulta sobre '{COLECCION_TRIBUTARIA}':")
+        print(f"  fragmentos devueltos        : {len(filas_tributaria)}")
+        print(f"  intrusos de otra coleccion  : {len(intrusos_t)}")
+        detalle(filas_tributaria)
+        print()
+        print(f"Consulta sobre '{COLECCION_BANCARIA}':")
+        print(f"  fragmentos devueltos        : {len(filas_bancaria)}")
+        print(f"  intrusos de otra coleccion  : {len(intrusos_b)}")
+        detalle(filas_bancaria)
+        print()
+        print(f"Control sobre coleccion inexistente '{COLECCION_FANTASMA}':")
+        print(f"  fragmentos devueltos        : {len(filas_fantasma)}")
+        print("=" * 70)
 
-        print("\nDetalle de similitudes devueltas:")
-        for etiqueta, filas in ((COLECCION_A, filas_a), (COLECCION_B, filas_b)):
-            for f in filas:
-                sim = f.get("similarity")
-                sim_txt = f"{sim:.4f}" if isinstance(sim, (int, float)) else "n/d"
-                print(
-                    f"  [{str(f.get('coleccion_id')):<16}] sim={sim_txt}  "
-                    f"{str(f.get('contenido', ''))[:50]}"
-                )
-
-        print("\n" + "=" * 68)
-
-        # --- Aserciones -----------------------------------------------
+        # --- Aserciones ---------------------------------------------
         fallos = []
 
-        if not filas_a:
-            fallos.append(f"La RPC no devolvio filas de '{COLECCION_A}'.")
-        if not filas_b:
-            fallos.append(f"La RPC no devolvio filas de '{COLECCION_B}'.")
+        if not filas_tributaria:
+            fallos.append(f"La RPC no devolvio filas de '{COLECCION_TRIBUTARIA}'.")
+        if not filas_bancaria:
+            fallos.append(f"La RPC no devolvio filas de '{COLECCION_BANCARIA}'.")
 
-        total_intrusos = len(intrusos_a) + len(intrusos_b)
+        total_intrusos = len(intrusos_t) + len(intrusos_b)
         if total_intrusos:
             fallos.append(f"{total_intrusos} fragmentos de la coleccion ajena se colaron.")
 
-        if control:
+        if filas_fantasma:
             fallos.append(
-                f"Una coleccion inexistente devolvio {len(control)} fragmentos; "
-                "el filtro no esta restringiendo el espacio vectorial."
+                f"Una coleccion inexistente devolvio {len(filas_fantasma)} fragmentos; "
+                "el filtro no restringe el espacio vectorial."
             )
 
-        if not ids_son_visibles(filas_a, filas_b, ids):
-            fallos.append("Las filas sembradas no aparecen en los resultados.")
+        esperados = set(ids)
+        obtenidos = {f["id"] for f in filas_tributaria} | {f["id"] for f in filas_bancaria}
+        if not (esperados & obtenidos):
+            fallos.append("Las filas sembradas no aparecen en los resultados: el test no es sensible.")
 
+        print()
         if fallos:
             print("[X] FAIL")
-            for f in fallos:
-                print(f"    - {f}")
+            for msg in fallos:
+                print(f"    - {msg}")
             return 1
 
-        print("[✓] PASS: cero contaminacion cruzada entre colecciones.")
-        print(f"    - '{COLECCION_A}': {len(filas_a)} fragmentos, 0 intrusos")
-        print(f"    - '{COLECCION_B}': {len(filas_b)} fragmentos, 0 intrusos")
+        print("[OK] PASS: cero contaminacion cruzada entre colecciones.")
+        print(f"    - '{COLECCION_TRIBUTARIA}': {len(filas_tributaria)} fragmentos, 0 intrusos")
+        print(f"    - '{COLECCION_BANCARIA}': {len(filas_bancaria)} fragmentos, 0 intrusos")
         print(f"    - Coleccion inexistente: 0 fragmentos (espacio vectorial restringido)")
         return 0
 
     finally:
-        limpiar(ids)
-
-
-def ids_son_visibles(filas_a, filas_b, ids):
-    """Confirma que la RPC devolvio nuestras filas sembradas."""
-    esperados = set(ids)
-    obtenidos = {f["id"] for f in filas_a} | {f["id"] for f in filas_b}
-    return bool(esperados & obtenidos)
+        limpiar(env, ids)
 
 
 if __name__ == "__main__":
