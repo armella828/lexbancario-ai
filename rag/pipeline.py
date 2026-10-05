@@ -15,7 +15,11 @@ from .clients import ENTORNO
 from .embeddings import LimitadorCadencia, generar_embeddings as _generar_embeddings
 from .scraper import descargar_lote
 
-TAMANO_LOTE_DEFAULT = 10
+# Tamano de lote de embeddings: lo resuelve `rag.embeddings` desde el
+# entorno, asi que no se duplica la constante aqui.
+# Filas por llamada de insercion. Supabase acepta lotes grandes, pero un
+# INSERT unico con cientos de filas y vectores de 768 dimensiones excede
+# el limite util de la peticion y complica reintentar un fallo parcial.
 INSERCION_LOTE = 200
 
 
@@ -69,17 +73,15 @@ def generar_embeddings(
     trozos: List[Trozo],
     coleccion_id: str,
     documento_por_url: dict,
-    tamano_lote: int = TAMANO_LOTE_DEFAULT,
+    tamano_lote: Optional[int] = None,
     limitador: Optional[LimitadorCadencia] = None,
 ) -> List[dict]:
     """Genera embeddings en lotes y devuelve filas listas para insertar."""
     filas = []
-    total = len(trozos)
-    textos = [t.contenido for t in trozos]
     # Un unico limitador para toda la ingesta: la cadencia se aplica sobre
     # el total de requests emitidos, no de forma independiente por lote.
     vectores = _generar_embeddings(
-        textos,
+        [t.contenido for t in trozos],
         tamano_lote=tamano_lote,
         limitador=limitador or LimitadorCadencia(),
     )
@@ -109,6 +111,23 @@ def _organizar_por_url(resultados) -> dict:
     return mapa
 
 
+def insertar_filas(filas: List[dict]) -> int:
+    """Inserta las filas por lotes y devuelve cuantas se enviaron.
+
+    Se trocea en lugar de mandar un unico INSERT porque el payload crece
+    con el numero de filas y cada vector aporta 768 flotantes: un solo
+    INSERT de cientos de filas se acerca al limite de la peticion y, si
+    falla a medias, obliga a reintentar el lote entero. Con lotes de 200
+    un fallo descarta mucho menos trabajo.
+    """
+    total = 0
+    for inicio in range(0, len(filas), INSERCION_LOTE):
+        lote = filas[inicio:inicio + INSERCION_LOTE]
+        ENTORNO.supabase.table("normativa_bancaria").insert(lote).execute()
+        total += len(lote)
+    return total
+
+
 def ingestar(
     urls: List[str],
     coleccion_id: str,
@@ -116,12 +135,16 @@ def ingestar(
     chunk_overlap: int = 200,
     concurrencia: int = 4,
     procesos_chunking: Optional[int] = None,
-    tamano_lote: int = TAMANO_LOTE_DEFAULT,
+    tamano_lote: Optional[int] = None,
     inserting: bool = True,
 ) -> ResultadoIngesta:
-    """Ejecuta el pipeline completo y devuelve metricas por fase."""
+    """Ejecuta el pipeline completo y devuelve metricas por fase.
+
+    `tamano_lote=None` delega en la configuracion del entorno
+    (`EMBEDDINGS_TAMANO_LOTE`), de modo que el ajuste se hace en un solo
+    sitio y no queda duplicado entre el pipeline y el modulo de embeddings.
+    """
     resultado = ResultadoIngesta(coleccion_id=coleccion_id)
-    inicio_total = time.perf_counter()
 
     # --- Fase 1: descarga y limpieza (I/O) -----------------------------
     t0 = time.perf_counter()
@@ -181,11 +204,7 @@ def ingestar(
     # --- Fase 4: insercion en Supabase ---------------------------------
     t0 = time.perf_counter()
     if inserting and filas:
-        for inicio in range(0, len(filas), INSERCION_LOTE):
-            ENTORNO.supabase.table("normativa_bancaria").insert(
-                filas[inicio:inicio + INSERCION_LOTE]
-            ).execute()
-        resultado.insertados = len(filas)
+        resultado.insertados = insertar_filas(filas)
     resultado.tiempos["insercion"] = time.perf_counter() - t0
 
     return resultado
