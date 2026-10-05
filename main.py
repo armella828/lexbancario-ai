@@ -75,6 +75,13 @@ class IngestaWebRequest(BaseModel):
         4, ge=1, le=32,
         description="Peticiones HTTP simultaneas maximas",
     )
+    batch_size: Optional[int] = Field(
+        None, ge=1, le=100,
+        description=(
+            "Fragmentos por llamada a la API de embeddings. Si se omite se usa "
+            "EMBEDDINGS_TAMANO_LOTE del entorno."
+        ),
+    )
 
     def validar_solapamiento(self):
         if self.chunk_overlap >= self.chunk_size:
@@ -290,6 +297,7 @@ def ingestar_web(req: IngestaWebRequest):
         chunk_overlap=req.chunk_overlap,
         concurrencia=req.concurrency_workers,
         procesos_chunking=req.concurrency_workers,
+        tamano_lote=req.batch_size,
     )
 
     resumen = resultado.resumen()
