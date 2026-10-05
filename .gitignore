@@ -24,8 +24,13 @@ respaldos/
 # pertenece al repo, y ademas versionarla haria el repositorio enorme.
 cache_embeddings/
 
-# Resultados de benchmark regenerables (si se versionan, van aqui)
+# Graficos del informe: se versionan a proposito, el informe los cita.
+# El `*.png` de arriba los excluye, asi que hay que exceptuarlos.
 !resultados/*.png
+
+# Datos crudos de benchmark: se regeneran corriendo el benchmark, asi que
+# no van al repo. Los PNG de arriba si, porque son la evidencia citada.
+resultados/*.json
 
 # Logs y base de datos local si hubiera
 *.log

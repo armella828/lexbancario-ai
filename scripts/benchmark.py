@@ -319,12 +319,39 @@ def main():
     if args.serie in ("b", "todas"):
         salida["serie_b"] = ejecutar_serie_b(args)
 
+    # Se fusiona con lo anterior en lugar de sobrescribir: las dos series
+    # no dependen la una de la otra, y correr solo una no debe borrar la
+    # evidencia de la otra. Ademas, un codigo de retorno no es un
+    # resultado: si una serie fallo, se guarda el error con su mensaje, no
+    # un entero que un grafico interpretaria como dato.
+    limpia = {k: v for k, v in salida.items() if not isinstance(v, int)}
+    if not limpia:
+        print("[X] Ninguna serie produjo resultados.")
+        return 1
+
     ruta = os.path.join(RAIZ, "resultados", "benchmark.json")
     os.makedirs(os.path.dirname(ruta), exist_ok=True)
+    previo = {}
+    if os.path.exists(ruta):
+        try:
+            with open(ruta, encoding="utf-8") as fh:
+                previo = json.load(fh)
+        except (ValueError, OSError):
+            previo = {}
+
+    acumulado = dict(previo.get("resultados", {}))
+    acumulado.update(limpia)
+    fallidas = [k for k, v in salida.items() if isinstance(v, int)]
+
     with open(ruta, "w", encoding="utf-8") as fh:
-        json.dump({"config": vars(args), "resultados": salida},
+        json.dump({"config": vars(args), "resultados": acumulado},
                   fh, ensure_ascii=False, indent=2)
+
     print()
+    print(f"[*] Series guardadas: {', '.join(sorted(limpia))}")
+    if fallidas:
+        print(f"[!] Sin datos: {', '.join(fallidas)} "
+              "(se conserva lo anterior)")
     print(f"[*] Resultados en {ruta}")
     return 0
 
