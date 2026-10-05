@@ -5,6 +5,7 @@ los benchmarks y la API: todos consumen la misma instancia en lugar de crear
 una por modulo, lo que ademas reduce el numero de conexiones HTTP abiertas.
 """
 import os
+import threading
 
 from dotenv import load_dotenv
 from google import genai
@@ -40,29 +41,57 @@ def config_embeddings() -> types.EmbedContentConfig:
     return types.EmbedContentConfig(output_dimensionality=DIMENSIONES_EMBEDDING)
 
 
+def config_entero(nombre: str, por_defecto: int) -> int:
+    """Lee un entero opcional del entorno.
+
+    A diferencia de `_exigir`, aqui la variable es un ajuste de Rendimiento y
+    no un requisito: si falta o no es un entero valido se usa el valor por
+    defecto, para que un `.env` incompleto no impida arrancar el pipeline.
+    """
+    valor = os.getenv(nombre)
+    if valor is None or valor.strip() == "":
+        return por_defecto
+    try:
+        return int(valor)
+    except ValueError:
+        return por_defecto
+
+
 class Entorno:
-    """Envolvimiento de los clientes externos con inicializacion perezosa."""
+    """Envolvimiento de los clientes externos con inicializacion perezosa.
+
+    La inicializacion se protege con un lock. Sin el, dos peticiones
+    simultaneas que demanden el cliente por primera vez crearian dos
+    instancias a la vez, abriendo el doble de conexiones HTTP y
+    descartando una. FastAPI ejecuta los endpoints sincronicos en un thread
+    pool, de modo que esa carrera es real y no teorica.
+    """
 
     def __init__(self):
         self._supabase = None
         self._ai = None
+        self._lock = threading.Lock()
 
     @property
     def supabase(self):
         if self._supabase is None:
-            self._supabase = create_client(
-                _exigir("SUPABASE_URL"),
-                _exigir("SUPABASE_SERVICE_ROLE_KEY"),
-            )
+            with self._lock:
+                if self._supabase is None:
+                    self._supabase = create_client(
+                        _exigir("SUPABASE_URL"),
+                        _exigir("SUPABASE_SERVICE_ROLE_KEY"),
+                    )
         return self._supabase
 
     @property
     def ai(self):
         if self._ai is None:
-            self._ai = genai.Client(
-                api_key=_exigir("GEMINI_API_KEY"),
-                http_options=types.HttpOptions(timeout=TIMEOUT_MS_GENERACION),
-            )
+            with self._lock:
+                if self._ai is None:
+                    self._ai = genai.Client(
+                        api_key=_exigir("GEMINI_API_KEY"),
+                        http_options=types.HttpOptions(timeout=TIMEOUT_MS_GENERACION),
+                    )
         return self._ai
 
     @property
