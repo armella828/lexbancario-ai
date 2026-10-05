@@ -39,3 +39,22 @@ as $$
   where c.table_name = p_tabla
   order by c.ordinal_position;
 $$;
+
+-- Privilegios EXECUTE sobre una funcion. Util para comprobar que las
+-- funciones SECURITY DEFINER no quedaron abiertas al rol PUBLIC.
+create or replace function verificar_privilegios(p_funcion text default 'ejecutar_sql')
+returns table (
+  usuario   text,
+  privilegio text
+)
+language sql
+stable
+set search_path = public
+as $$
+  select
+    rp.grantee,
+    rp.privilege_type
+  from information_schema.routine_privileges rp
+  where rp.routine_name = p_funcion
+  order by rp.grantee;
+$$;
