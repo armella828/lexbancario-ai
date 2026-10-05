@@ -61,12 +61,13 @@ class Entorno:
         self.ai = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
     def embedir(self, textos):
-        res = self.ai.models.embed_content(
-            model=MODEL_EMBEDDING,
-            contents=textos,
-            config=types.EmbedContentConfig(output_dimensionality=DIMENSIONES),
-        )
-        return [e.values for e in res.embeddings]
+        # Se delega en rag.embeddings para reutilizar el batching y el
+        # backoff, y para que la cuota agotada se reporte con un mensaje
+        # util en lugar de un volcado de excepcion del cliente HTTP.
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from rag.embeddings import generar_embeddings
+
+        return generar_embeddings(textos, tamano_lote=len(textos) or 1)
 
     def consultar(self, coleccion, vector, top_k=10, umbral=0.0):
         resp = self.supa.rpc(RPC, {
@@ -130,8 +131,21 @@ def main():
     tag = uuid.uuid4().hex[:8]
     ids = None
     try:
-        ids = sembrar(env, tag)
-        vector = env.embedir(["capital minimo y reserva"])[0]
+        try:
+            ids = sembrar(env, tag)
+            vector = env.embedir(["capital minimo y reserva"])[0]
+        except Exception as exc:
+            # Sin cuota de embeddings no se puede sembrar nada. Es una
+            # condicion del entorno, no un fallo del aislamiento: se
+            # informa y se sale sin marcar la prueba como rota.
+            if "horas" in str(exc) or "DIARIA" in str(exc) or "QuotaAgotada" in type(exc).__name__:
+                print("\n" + "=" * 70)
+                print("[--] PRUEBA OMITIDA: cuota de embeddings agotada.")
+                print("=" * 70)
+                print(f"     {exc}")
+                print("\n     Reejecutar cuando la cuota se renueve.")
+                return 0
+            raise
 
         filas_tributaria = env.consultar(COLECCION_TRIBUTARIA, vector)
         filas_bancaria = env.consultar(COLECCION_BANCARIA, vector)
