@@ -5,7 +5,7 @@ requests por minuto (100 r/min para `embed_content` en el free tier). El
 limite cuenta REQUESTES, no textos: enviar 100 textos en 100 llamadas agota
 la cuota igual que enviar 1000 textos en 100 llamadas, pero el segundo caso
 hace 10 veces mas trabajo por request consumido. Por eso el batching no es
-solo una optimizacion de latencia, es unsustainable la ingesta.
+solo una optimizacion de latencia: es lo que hace sostenible la ingesta.
 
 Se combinan tres mecanismos:
 
@@ -22,17 +22,32 @@ import threading
 import time
 from typing import List, Optional
 
-from .clients import ENTORNO, MODEL_EMBEDDING, config_embeddings
+from .clients import ENTORNO, MODEL_EMBEDDING, config_embeddings, config_entero
 
+# Cadencia por defecto: 80 requests/min, un 20% por debajo del limite duro
+# de 100 r/min del nivel gratuito. El margen absorbe la facturacion de
+# requests ya en vuelo cuando empieza la ventana siguiente.
+REQUESTS_POR_MINUTO_DEFAULT = 80
 TAMANO_LOTE_DEFAULT = 10
 MAX_INTENTOS = 6
 BACKOFF_BASE_SEGUNDOS = 2.0
-BACKOFF_MAX_SEGUNDOS = 90.0
+# Ninguna espera puede pasar de una ventana completa de cuota: esperar mas
+# de 60s no puede ayudar, porque la cuota por minuto se renueva cada minuto.
+BACKOFF_MAX_SEGUNDOS = 60.0
+# Si el servidor pide mas que esto, reintentar no va a funcionar: se trata de
+# una cuota agotada de verdad (por ejemplo la cuota DIARIA de 1000 requests
+# del nivel gratuito), no de un pico transitorio de peticiones por minuto.
+# Ante ese caso se falla de inmediato con un mensaje util en lugar de dejar
+# un endpoint HTTP colgado horas.
+RETRY_DELAY_MAX_ACEPTABLE_SEGUNDOS = 120.0
 
-# Cadencia por defecto del nivel gratuito (100 requests/min). Se deja
-# margen de seguridad del 20% frente al limite duro.
-REQUESTS_POR_MINUTO = 100
-MARGEN_SEGURIDAD = 0.8
+
+def tamano_lote_configurado() -> int:
+    return max(1, config_entero("EMBEDDINGS_TAMANO_LOTE", TAMANO_LOTE_DEFAULT))
+
+
+def cadencia_configurada() -> int:
+    return max(1, config_entero("EMBEDDINGS_REQUESTS_POR_MINUTO", REQUESTS_POR_MINUTO_DEFAULT))
 
 
 class CuotaAgotada(RuntimeError):
@@ -47,8 +62,9 @@ class LimitadorCadencia:
     exactamente el necesario y no un redondeo por lote.
     """
 
-    def __init__(self, requests_por_minuto: int = REQUESTS_POR_MINUTO):
-        self._minimo_entre = 60.0 / max(1, requests_por_minuto)
+    def __init__(self, requests_por_minuto: int = None):
+        rpm = requests_por_minuto or cadencia_configurada()
+        self._minimo_entre = 60.0 / max(1, rpm)
         self._ultimo = 0.0
         self._lock = threading.Lock()
         self.esperas = 0.0
@@ -65,26 +81,50 @@ class LimitadorCadencia:
             self._ultimo = ahora
 
 
+def _duracion_legible(segundos: float) -> str:
+    """Formatea una espera como '4h 29 min' o '27 s', para mensajes de error."""
+    if segundos >= 3600:
+        return f"{segundos / 3600:.1f} horas"
+    if segundos >= 60:
+        return f"{segundos / 60:.0f} minutos"
+    return f"{segundos:.0f} s"
+
+
+def _duracion_a_segundos(texto: str) -> float:
+    """Convierte una duracion de Google a segundos.
+
+    La API escribe el retraso en varios formatos segun el cliente: "27s",
+    "4h29m8s" o "1m30s". Sin esto, un "4h29m" se leeria como 4 segundos o
+    como un numero gigante, y en ambos casos la espera seria incorrecta.
+    """
+    total = 0.0
+    for valor, unidad in re.findall(r"(\d+(?:\.\d+)?)\s*([hms])", texto):
+        factor = {"h": 3600.0, "m": 60.0, "s": 1.0}[unidad]
+        total += float(valor) * factor
+    return total
+
+
 def _extraer_retry_delay(mensaje: str, por_defecto: float) -> float:
     """Lee la espera que Gemini indica en el cuerpo del error 429.
 
-    La API reporta el tiempo en varias formas textuales segun el cliente:
-    "Please retry in 27.69s", "retryDelay: 27s" o el JSON anidado
-    `retryDelay: '27s'`. Se cubren todas y si no aparece se usa el
-    backoff propio.
+    Se cubren los formatos textuales ("Please retry in 4h29m8s",
+    "retry after 12s") y el campo JSON anidado `retryDelay`. Si no aparece
+    ninguno se devuelve el backoff propio.
     """
     patrones = (
-        r"retry\s+in\s+([\d.]+)\s*s",
-        r"retry\s+after\s+([\d.]+)\s*s",
-        r"retry_?delay\D{0,25}?([\d.]+)\s*s",
+        # "Please retry in 4h29m8s" / "retry after 12s". Se captura todo el
+        # token porque las duraciones pueden componerse (4h29m8s).
+        r"retry\s+in\s+(\d[\d.]*(?:[hms][\d.]*)*[hms]?)",
+        r"retry\s+after\s+(\d[\d.]*(?:[hms][\d.]*)*[hms]?)",
+        # JSON: 'retryDelay': '27s' -> aqui la unidad va dentro del grupo
+        r"retry_?delay\D{0,25}?(\d+(?:\.\d+)?\s*[hms])",
     )
     for patron in patrones:
         m = re.search(patron, mensaje, re.IGNORECASE)
         if m:
-            try:
-                return float(m.group(1))
-            except ValueError:
-                continue
+            valor = _duracion_a_segundos(m.group(1))
+            if valor > 0:
+                return valor
     return por_defecto
 
 
@@ -96,16 +136,25 @@ def _es_transitorio(mensaje: str) -> bool:
     return any(m in mensaje for m in marcas)
 
 
-def embedir_lote(textos: List[str], limitador: Optional[LimitadorCadencia] = None):
-    """Genera embeddings para un lote, con reintentos y backoff."""
+def embedir_lote(
+    textos: List[str],
+    limitador: Optional[LimitadorCadencia] = None,
+    cliente_ai=None,
+):
+    """Genera embeddings para un lote, con reintentos y backoff.
+
+    `cliente_ai` permite inyectar un doble en las pruebas para ejercitar el
+    backoff de forma determinista, sin depender de agotar la cuota real.
+    """
     limitador = limitador or LimitadorCadencia()
+    cliente = cliente_ai if cliente_ai is not None else ENTORNO.ai
     espera = BACKOFF_BASE_SEGUNDOS
     ultimo_error = None
 
     for intento in range(1, MAX_INTENTOS + 1):
         try:
             limitador.esperar_turno()
-            respuesta = ENTORNO.ai.models.embed_content(
+            respuesta = cliente.models.embed_content(
                 model=MODEL_EMBEDDING,
                 contents=textos,
                 config=config_embeddings(),
@@ -120,7 +169,18 @@ def embedir_lote(textos: List[str], limitador: Optional[LimitadorCadencia] = Non
                 break
 
             if "429" in mensaje or "RESOURCE_EXHAUSTED" in mensaje:
-                pausa = _extraer_retry_delay(mensaje, espera)
+                pedido = _extraer_retry_delay(mensaje, espera)
+                if pedido > RETRY_DELAY_MAX_ACEPTABLE_SEGUNDOS:
+                    horas = pedido / 3600.0
+                    raise CuotaAgotada(
+                        f"La API pide esperar {horas:.1f} h antes de reintentar, "
+                        f"asi que no es un pico transitorio de peticiones por "
+                        f"minuto sino cuota agotada (con frecuencia la cuota "
+                        f"DIARIA de embeddings del nivel gratuito). No se "
+                        f"reintenta: espera {_duracion_legible(pedido)} y "
+                        f"reintenta la ingesta."
+                    )
+                pausa = min(BACKOFF_MAX_SEGUNDOS, pedido)
                 espera = min(BACKOFF_MAX_SEGUNDOS, max(espera * 2, pausa))
             else:
                 # Jitter del 25% para que varios workers no compitan por el
@@ -128,7 +188,7 @@ def embedir_lote(textos: List[str], limitador: Optional[LimitadorCadencia] = Non
                 pausa = min(BACKOFF_MAX_SEGUNDOS, espera)
                 espera = min(BACKOFF_MAX_SEGUNDOS, espera * 2)
 
-            pausa *= 1.0 + random.uniform(0.0, 0.25)
+            pausa = min(BACKOFF_MAX_SEGUNDOS, pausa * (1.0 + random.uniform(0.0, 0.25)))
             print(
                 f"    [!] {type(exc).__name__} transitorio "
                 f"(intento {intento}/{MAX_INTENTOS}); pausa {pausa:.1f}s"
@@ -149,9 +209,10 @@ def lotes(textos: List[str], tamano: int = TAMANO_LOTE_DEFAULT):
 
 def generar_embeddings(
     textos: List[str],
-    tamano_lote: int = TAMANO_LOTE_DEFAULT,
+    tamano_lote: int = None,
     limitador: Optional[LimitadorCadencia] = None,
     al_progresar=None,
+    cliente_ai=None,
 ) -> List[list]:
     """Genera embeddings de `textos` por lotes, con limite de cuota global.
 
@@ -159,11 +220,12 @@ def generar_embeddings(
     aplica sobre el total de requests, no por lote.
     """
     limitador = limitador or LimitadorCadencia()
+    tamano_lote = tamano_lote or tamano_lote_configurado()
     vectores: List[list] = []
 
     for indice, lote in enumerate(lotes(textos, tamano_lote), start=1):
         if al_progresar:
             al_progresar(indice, lote)
-        vectores.extend(embedir_lote(lote, limitador))
+        vectores.extend(embedir_lote(lote, limitador, cliente_ai))
 
     return vectores
