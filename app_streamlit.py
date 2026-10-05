@@ -19,6 +19,13 @@ with st.sidebar:
     st.divider()
     
     st.subheader("Configuración de Recuperación")
+    # La collection es obligatoria: el backend restringe la busqueda
+    # vectorial a este namespace y responde 422 si falta.
+    coleccion_id = st.text_input(
+        "Colección (obligatorio):",
+        value="asfi_rnsf",
+        help="Namespace temático. Ej: asfi_rnsf, demo_tributaria, demo_bancaria",
+    )
     top_k = st.slider("Documentos a recuperar (top_k):", min_value=1, max_value=8, value=4)
     threshold = st.slider("Umbral mínimo de similitud:", min_value=0.20, max_value=0.80, value=0.35, step=0.05)
     
@@ -58,6 +65,7 @@ if prompt := st.chat_input("Escribe tu consulta legal o normativa (ej. facultade
         with st.spinner("Consultando base vectorial y generando fundamentación jurídica..."):
             payload = {
                 "pregunta": prompt,
+                "coleccion_id": coleccion_id,
                 "top_k": top_k,
                 "match_threshold": threshold
             }
