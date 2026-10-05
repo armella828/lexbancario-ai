@@ -17,6 +17,12 @@ documentos_u/
 *.jpg
 *.jpeg
 
+# Respaldos de base de datos (contienen datos reales, nunca al repo)
+respaldos/
+
+# Resultados de benchmark regenerables (si se versionan, van aqui)
+!resultados/*.png
+
 # Logs y base de datos local si hubiera
 *.log
 error_build*.txt
@@ -24,12 +30,9 @@ error_build*.txt
 .vscode/
 
 # Artefactos accidentales de terminal
-[internal]
 CACHED
 ERROR
 See
 transferring
 reading
 resolve
-=
-26.2.1
