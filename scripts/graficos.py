@@ -154,6 +154,79 @@ def grafico_fases(serie_a):
     return ruta
 
 
+def grafico_fases_serie_b(fria, caliente):
+    """Desglose porcentual de las 4 fases en la pasada fria y la caliente.
+
+    Devuelve la ruta del PNG, o None si no hay ninguna pasada. La idea es
+    mostrar el mismo 100% desde dos angulos: donde se va el tiempo (donut)
+    en la pasada que SI paga la API, y el contraste de magnitudes entre
+    fria y caliente (barras), donde la cache aplasta la fase de embeddings.
+    """
+    fases = ("descarga", "chunking", "embeddings", "insercion")
+    colores = ["#1f6fb4", "#c98a2b", "#b04a3f", "#2e8b57"]
+
+    series = {}
+    for etiqueta, serie in (("en frío (API)", fria), ("con caché", caliente)):
+        if not serie:
+            continue
+        u = serie.get("una_pasada", {})
+        vals = {f: u.get(f, 0.0) for f in fases}
+        total = sum(vals.values())
+        if not total:
+            continue
+        series[etiqueta] = (vals, total)
+
+    if not series:
+        return None
+
+    n = len(series)
+    fig, (ax1, ax2) = plt.subplots(
+        1, 2, figsize=(11, 3.6), gridspec_kw={"width_ratios": [3, 2]})
+
+    # Donut: reparto de tiempo en la pasada que toca la API (la extensa).
+    etiqueta_pri = next(
+        (e for e in ("en frío (API)", "con caché") if e in series), None)
+    vals, total = series[etiqueta_pri]
+    pcts = [100 * vals[f] / total for f in fases]
+    ax1.pie(pcts, colors=colores, startangle=90, counterclock=False,
+            autopct=lambda p: f"{p:.1f}%", pctdistance=0.82,
+            textprops={"fontsize": 8})
+    ax1.legend(fases, loc="center left", bbox_to_anchor=(0.98, 0.5),
+               fontsize=8)
+    ax1.text(0, 0, etiqueta_pri.replace(" (API)", ""), ha="center",
+             va="center", fontsize=9, color="#0d2b45", fontweight="bold")
+    ax1.set_title(f"Reparto del tiempo · {etiqueta_pri}\n"
+                  f"{total:.1f} s en total", fontsize=10)
+
+    # Barras: el mismo tiempo en absolutos, fria vs caliente. La fase de
+    # embeddings explica casi toda la diferencia.
+    x = [etiquetas.index(e) for e in series] if False else range(n)
+    x = list(range(n))
+    ancho = 0.8 / len(fases)
+    for i, fase in enumerate(fases):
+        ys = [series[e][0][fase] for e in ["en frío (API)", "con caché"]
+              if e in series]
+        pos = [p + i * ancho - 0.4 + ancho / 2 for p in x]
+        ax2.bar(pos, ys, width=ancho, label=fase, color=colores[i])
+    ax2.set_xticks(x)
+    ax2.set_xticklabels([e for e in ("en frío (API)", "con caché")
+                         if e in series], fontsize=8)
+    ax2.set_yscale("log")
+    ax2.set_ylabel("segundos (escala log)")
+    ax2.set_title("Tiempo absoluto por fase", fontsize=10)
+    ax2.legend(fontsize=8)
+    ax2.grid(True, axis="y", alpha=0.25)
+    ax2.set_ylim(max(min(v for s in series.values() for v in s[0].values()
+                         if v > 0) * 0.5, 1e-3),
+                 max(v for s in series.values() for v in s[0].values()) * 3)
+
+    fig.tight_layout()
+    ruta = os.path.join(SALIDA, "fases_serie_b.png")
+    fig.savefig(ruta, dpi=150)
+    plt.close(fig)
+    return ruta
+
+
 def main():
     data = cargar()
     serie_a = serie_a_config(data)
@@ -166,9 +239,13 @@ def main():
     for ruta in (grafico_speedup(serie_a), grafico_fases(serie_a)):
         print(f"[OK] {ruta}")
 
-    # Si Serie B esta, se listan sus fases para el informe.
+    # Si Serie B esta, se listan sus fases y se dibuja el desglose.
     serie_b = data.get("resultados", {}).get("serie_b")
-    if serie_b and "una_pasada" in serie_b:
+    serie_b_fria = data.get("resultados", {}).get("serie_b_fria")
+    ruta_b = grafico_fases_serie_b(serie_b_fria, serie_b)
+    if ruta_b:
+        print(f"[OK] {ruta_b}")
+    elif serie_b:
         print()
         print("[*] Serie B:")
         for fase in ("descarga", "chunking", "embeddings", "insercion"):

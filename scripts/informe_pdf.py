@@ -269,12 +269,15 @@ def construir_html():
         bf_hits = f"{max(0, bm['b'].get('fragmentos', 0) - (fallidos or 0))}/{bm['b'].get('fragmentos', 0)}"
 
     # Fila de Serie B: una de las dos variantes, o el aviso de cuota.
-    filas_b_visibles = (filas_bf or filas_b
-        or "<tr><td colspan=3>Serie B pendiente de cuota: la fase de "
-           "embeddings llama a la API y la cuota diaria del nivel gratuito "
-           "está agotada en el momento de generar este informe.</td></tr>")
-    b_titulo = ('Fases · pasada caliente' if filas_b and not filas_bf
-                else 'Fases · pasada en frío')
+    b_sin_dato = ("<tr><td colspan=3>pendiente de cuota: la fase de "
+                  "embeddings llama a la API y la cuota diaria del nivel "
+                  "gratuito estaba agotada al generar este informe.</td></tr>")
+
+    # El grafico de Serie B solo se incluye si graficos.py lo genero con
+    # datos reales; sin datos (o con simulados) no debe aparecer imagen.
+    grafico_b_html = ""
+    if os.path.exists(os.path.join(RESULTADOS, "fases_serie_b.png")):
+        grafico_b_html = '<img src="resultados/fases_serie_b.png" alt="desglose por fases de la Serie B">'
 
     # ------------------------------------------------------------- HTML
     return f"""<html><head><style>
@@ -503,36 +506,34 @@ y no existe competencia por la CPU de Postgres en el cliente.</p>
 (modelo + dimensión + texto), así que repetir un fragmento no consume cuota
 ni latencia. El modelo es <span class=mono>gemini-embedding-001</span> con
 768 dimensiones y la caché tiene actualmente
-<b>{n_cache} vectores</b> ({(ca['bytes']/1048576):.1f} MB).</p>
-
-<div class=caja><b>Lo que hay detrás de los porcentajes.</b>
-La Serie B es el pipeline completo con embeddings. La diferencia entre la
-pasada en frío y la pasada caliente aísla exactamente el coste que la caché
-elimina: sin caché, esa fase llama a la API (latencia de red y reintentos),
-y con caché resuelve contra disco. El hash SHA-256 de
-(modelo + dimensión + texto) garantiza que el acierto es para el mismo
-fragmento, no un "parecido".</div>
+<b>{n_cache} vectores</b> ({(ca['bytes']/1048576):.1f} MB). La Serie B es el
+pipeline completo (las cuatro fases con embeddings), medido sobre el mismo
+corpus de la Serie A.</p>
 
 <table class=par><tr><td>
-{b_titulo}
-<table><tr><th>Fase</th><th class=n>Tiempo</th><th class=n>% del total</th></tr>
-{filas_b_visibles}</table>
-<p class=pie>Los porcentajes se calculan de las cuatro fases del propio JSON;
-la Serie B fría es la que muestra cuánto pesa la API de terceros sin
-mitigación, y la variante caliente es el mismo pipeline reutilizando la
-caché.</p>
+<h3>Pasada en frío &middot; la API manda</h3>
+<table><tr><th>Fase</th><th class=n>Tiempo</th><th class=n>%</th></tr>
+{filas_bf or b_sin_dato}</table>
 </td><td class=der>
+<h3>Pasada caliente &middot; caché de disco</h3>
+<table><tr><th>Fase</th><th class=n>Tiempo</th><th class=n>%</th></tr>
+{filas_b or b_sin_dato}</table>
+<p class=pie>{('Aciertos de caché: ' + bf_hits) if (filas_b or filas_bf) else 'Sin datos de Serie B: la cuota gratuita estaba agotada.'}
+Ambas columnas comparten las mismas fases; la diferencia entre fría y
+caliente es exactamente lo que la caché elimina (los % se calculan de las
+cuatro fases del propio JSON).</p>
+</td></tr></table>
+{grafico_b_html}
 <h3>Qué se comprueba</h3>
 <ul>
-<li><b>Aciertos de caché</b>: {bf_hits if filas_b or filas_bf else '—'} fragmentos
-resueltos sin llamar a la API (la pasada fría paga la API y guarda el
-vector; las siguientes lo leen de disco).</li>
-<li><b>57 comprobaciones</b> del formato de lotes, cadencia y backoff ante
-429, y <b>10 de la inserción</b> por lotes de 200 filas, todas en verde.</li>
-<li>Con la caché vacía el script aborta y explica cómo calentarla; sin esa
-guardia, la Serie B mediría esperas de reintentos en lugar de concurrencia.</li>
+<li><b>Aciertos de caché</b>: la pasada fría paga la API y guarda el vector;
+las demás lo leen de disco por hash SHA-256 de (modelo + dimensión +
+texto), con el total de fragmentos registrado en el JSON.</li>
+<li><b>57 comprobaciones</b> de formato de lotes y backoff ante 429, y
+<b>10 de la inserción</b> por lotes de 200 filas, todas en verde.</li>
+<li>Con la caché vacía el script aborta y explica cómo calentarla; así no
+mide esperas de reintentos en lugar de concurrencia.</li>
 </ul>
-</td></tr></table>
 
 <h2>7. Reproducibilidad, conclusiones y escalabilidad</h2>
 <table class=par><tr><td>
@@ -563,22 +564,19 @@ inserción serial y más procesos no lo cambian.</li>
 </td></tr></table>
 
 <div class="caja"><b>Escalabilidad frente a APIs de terceros.</b>
-La prueba más evidente del límite externo ocurrió durante este trabajo: al
-calentar la caché para el corpus nuevo (las 10 URLs de la Serie A), la API
-gratuita respondió <span class=mono>429 RESOURCE_EXHAUSTED</span> con
-<span class=mono>retryDelay=25789</span> s, bloqueando la Serie B durante
-horas. La lección es de diseño: <b>el techo de Amdahl mide el paralelismo de
-la propia máquina, pero no impone un límite a APIs externas</b>. Con el nivel
-gratuito (limitado en peticiones por hora), el rendimiento real del pipeline
-queda acotado por esa cuota y no por los 2 vCPU; la caché es exactamente lo
-que devuelve el problema al dominio local, donde Amdahl sí aplica.</div>
+Al calentar la caché del corpus nuevo, la API gratuita respondió
+<span class=mono>429 RESOURCE_EXHAUSTED</span> con
+<span class=mono>retryDelay=25789</span> s y bloqueó la Serie B durante
+horas. La lección es de diseño: <b>el techo de Amdahl mide el paralelismo
+de la máquina, no limita a las APIs externas</b>; con el nivel gratuito el
+rendimiento queda acotado por la cuota, y la caché es lo que devuelve ese
+coste al dominio local, donde Amdahl sí aplica.</div>
 
 <div class=aviso><b>Límites del trabajo.</b> La fracción serial se midió
-sobre la fase de inserción de la Serie A (sin embeddings), así que el techo
-de Amdahl describe el pipeline de ingesta local, no una garantía sobre el
-pipeline completo cuando interviene la API. Las mediciones de EXPLAIN varían
-entre corridas (run-to-run), por lo que se reporta el valor de la evidencia
-guardada y no una cifra exacta. Los datos provienen de documentos públicos
+sobre la inserción de la Serie A (sin embeddings); el techo describe la
+ingesta local, no el pipeline completo cuando interviene la API. Las
+mediciones de EXPLAIN varían entre corridas (run-to-run); se reporta el
+valor de la evidencia guardada. Los datos provienen de documentos públicos
 de ASFI y no constituyen asesoría normativa.</div>
 
 </body></html>"""
