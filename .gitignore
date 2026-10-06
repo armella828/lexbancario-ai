@@ -28,6 +28,11 @@ cache_embeddings/
 # El `*.png` de arriba los excluye, asi que hay que exceptuarlos.
 !resultados/*.png
 
+# El informe generado es el entregable de la practica, no un artefacto
+# intermedio. `*.pdf` de arriba existe para los documentos fuente, que son
+# pesados y ajenos al repo; el informe no entra en esa categoria.
+!resultados/informe.pdf
+
 # Datos crudos de benchmark: se regeneran corriendo el benchmark, asi que
 # no van al repo. Los PNG de arriba si, porque son la evidencia citada.
 resultados/*.json

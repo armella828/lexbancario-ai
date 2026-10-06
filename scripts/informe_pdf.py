@@ -456,6 +456,19 @@ def generar(salida):
         if paginas > 12:
             break
     writer.close()
+
+    # Story incrusta el PNG tal cual, sin /Filter: 1650x630 en RGB crudo
+    # salen 3.1 MB, y encima le agrega una SMask de 1 bit inutil porque el
+    # grafico no tiene transparencia. Un PDF de 2 paginas quedaba en 3.4 MB.
+    # A 234 DPI ya sobra resolucion para el ancho que ocupa, asi que se
+    # remuestrea y se comprime. El PNG de resultados/ no se toca: sigue
+    # siendo la evidencia de mayor resolucion.
+    doc = fitz.open(salida)
+    doc.rewrite_images(dpi_threshold=144, dpi_target=120, quality=90)
+    temporal = salida + ".tmp"
+    doc.save(temporal, garbage=4, deflate=True)
+    doc.close()
+    os.replace(temporal, salida)
     return paginas
 
 
