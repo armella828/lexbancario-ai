@@ -1,0 +1,31 @@
+==========================================================================
+AISLAMIENTO MULTI-TENANT A ESCALA
+==========================================================================
+[*] Colecciones: ['bancaria', 'regulatorio', 'tributario']
+[*] Fragmentos por coleccion: {'bancaria': 241, 'regulatorio': 62, 'tributario': 33}
+[*] 120 consultas, match_count=20, match_threshold=-1.0
+
+    20/120 consultas, 0 intrusiones hasta ahora
+    40/120 consultas, 0 intrusiones hasta ahora
+    60/120 consultas, 0 intrusiones hasta ahora
+    80/120 consultas, 0 intrusiones hasta ahora
+    100/120 consultas, 0 intrusiones hasta ahora
+    120/120 consultas, 0 intrusiones hasta ahora
+
+Consultas realizadas        : 120
+Filas recuperadas           : 2400
+Filas de otra coleccion     : 0
+Consultas con 0 resultados   : 0
+Filas en colecciones inexistentes: 0
+Tiempo total                : 32.4s
+
+  bancaria         800 filas (241 fragmentos sembrados)
+  regulatorio      800 filas (62 fragmentos sembrados)
+  tributario       800 filas (33 fragmentos sembrados)
+
+Control negativo (RPC sin filtro de coleccion):
+  desde bancaria     -> 20 filas sin filtrar, 20 de otras colecciones
+  desde regulatorio  -> 20 filas sin filtrar, 20 de otras colecciones
+  desde tributario   -> 20 filas sin filtrar, 20 de otras colecciones
+
+[OK] PASS: 120 consultas sin contaminacion cruzada.
