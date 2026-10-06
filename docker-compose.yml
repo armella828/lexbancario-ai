@@ -55,23 +55,56 @@ services:
     networks:
       - rag_net
 
-  bench:
+  fixtures:
     build: .
-    container_name: lexbancario_bench
-    # Detras de un perfil: el benchmark inserta y borra filas, y con la
-    # cuota de embeddings agotada cada intento real es un request que se
-    # pierde. Se lanza de forma consciente:
-    #     docker compose --profile bench up -d
+    container_name: lexbancario_fixtures
+    # Servidor de fixtures independiente, para probar a mano contra el
+    # pipeline sin tocar el benchmark. NO es el que usa la medicion: `bench`
+    # levanta el suyo propio dentro de su propio limite de CPU, porque una
+    # maquina de 2 vCPU simulada tiene que correr todo adentro.
+    #     docker compose --profile bench up -d fixtures
     profiles:
       - bench
-    command: >
-      python scripts/servidor_fixtures.py --host 0.0.0.0 --port 8099
+    command: python scripts/servidor_fixtures.py --host 0.0.0.0 --port 8099
     volumes:
       - .:/app
     env_file:
       - .env
-    # Tope de CPU para que el speedup medido sea reproducible en un equipo
-    # de 2 vCPU y no dependa de cuantos nucleos tenga la maquina.
+    networks:
+      - bench_net
+
+  bench:
+    build: .
+    container_name: lexbancario_bench
+    # Detras de un perfil: el benchmark inserta y borra filas, y cada corrida
+    # de la Serie B consume cuota si la cache fallo. Se lanza de forma
+    # consciente:
+    #     docker compose --profile bench run --rm bench
+    #
+    # UN SOLO contenedor hace de maquina de 2 vCPU: los fixtures y el
+    # benchmark corren aqui dentro, compartiendo el mismo presupuesto de CPU.
+    # Es la simulacion fiel. Si los fixtures vivieran en otro contenedor sin
+    # limite, el pipeline tendria a disposicion mas CPU de las que declara el
+    # resultado, y el speedup publicado no seria reproducible en el equipo
+    # donde se evalua.
+    #
+    # El limite va en este servicio y no en el servidor de fixtures: el
+    # paralelismo que se mide (concurrencia de descarga y procesos de
+    # chunking) vive en el cliente. Limitar solo el servidor mediria el
+    # cuello de botella del servidor, no el del pipeline.
+    profiles:
+      - bench
+    environment:
+      - BENCHMARK_BASE_URL=http://127.0.0.1:8099
+    # Los fixtures se levantan en segundo plano y el benchmark espera a que
+    # respondan (benchmark.py reintenta antes de abortar).
+    command: >
+      sh -c "python scripts/servidor_fixtures.py --host 127.0.0.1 --port 8099 &
+      sleep 4 && python scripts/benchmark.py --serie todas --urls 8 --replicas 5"
+    volumes:
+      - .:/app
+    env_file:
+      - .env
     deploy:
       resources:
         limits:
@@ -84,13 +117,13 @@ networks:
   rag_net:
     driver: bridge
 
-  # Red de medicion: aislada y con tope de CPU.
+  # Red de medicion, aislada de la de la aplicacion.
   #
   # El limite de 2 CPUs no es decorativo. Medir el paralelismo sobre las 24
   # vCPU de esta maquina daria un speedup que no se puede reproducir en el
   # equipo donde se evalua, y ademas camufla el costo real de coordinacion.
-  # El contenedor `bench` levanta los fixtures bajo esta red:
-  #     docker compose --profile bench up -d
-  # y el benchmark corre desde el host contra ese puerto.
+  # El tope vive en el servicio `bench`, que simula una maquina completa de
+  # 2 vCPU corriendo fixtures y pipeline juntos:
+  #     docker compose --profile bench run --rm bench
   bench_net:
     driver: bridge
