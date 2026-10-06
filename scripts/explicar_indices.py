@@ -95,28 +95,62 @@ def comprimir(plan):
     return VECTOR_EN_PLAN.sub("'[vector de 768 dims]'::vector", texto)
 
 
-def resumen(plan):
-    """Extrae el nodo raiz, el indice usado y las filas EFFECTIVAS leidas.
+def extraer_indice(limpio):
+    """Separa el nombre del indice del nombre de la tabla.
 
-    `rows=241` en un Bitmap Index Scan es el indice delivering esas filas;
+    En EXPLAIN los dos van casi juntos y confundirlos da una conclusion
+    falsa: `Index Scan using IDX on TABLA` trae las dos cosas, mientras que
+    `Seq Scan on TABLA` trae solo la tabla. Tomar lo que siga a `on` como
+    indice haria creer que un Seq Scan uso un indice llamado igual que la
+    tabla, que es exactamente la evidencia contraria a la que se busca.
+
+    Reglas:
+      * hay `using X`  -> X es el indice, y lo que sigue a `on` es la tabla
+      * `Bitmap Index Scan on X` -> X es el indice (sin tabla en la linea)
+      * `Seq Scan on X` -> X es la tabla, no hay indice
+    """
+    con_using = re.search(r"\busing (\w+)", limpio)
+    if con_using:
+        return con_using.group(1)
+    if "Index Scan on " in limpio:
+        return re.search(r"Index Scan on (\w+)", limpio).group(1)
+    return None
+
+
+def resumen(plan):
+    """Extrae el nodo raiz, el indice usado y las filas que se leyeron.
+
+    `rows=241` en un Bitmap Index Scan son las filas que entrego ese indice;
     el filtro de similitud recien ahi. Distinguirlo importa: si el filtro de
-    tenant no hubiera funcionado, el numero de filas Habria sido 672.
+    tenant no hubiera funcionado, el numero de filas habria sido 672.
     """
     texto = comprimir(plan)
     nodos = []
     for linea in texto.splitlines():
         limpio = linea.strip()
-        if limpio.startswith("->") or limpio.startswith(("Limit", "Sort")):
-            nombre = limpio.split("  ")[0].lstrip("-> ").strip()
-            filas = re.search(r"rows=(\d+)", limpio)
-            idx = re.search(r"on (\w+)", limpio)
-            real = re.search(r"actual time=[\d.]+\.\.\d+ rows=(\d+)", limpio)
-            nodos.append({
-                "nodo": nombre,
-                "indice": idx.group(1) if idx else None,
-                "filas_estimadas": int(filas.group(1)) if filas else None,
-                "filas_reales": int(real.group(1)) if real else None,
-            })
+        if not (limpio.startswith("->") or limpio.startswith(("Limit", "Sort"))):
+            continue
+        # El encabezado del nodo lleva `(cost=...) (actual time=...)` al
+        # final. Recortarlo ahi evita que el `$` de las regex de tabla no
+        # nunca coincida, porque lo que buscamos esta antes de esos parentesis.
+        cuerpo = re.split(r"\s+\((?:cost|actual time)=", limpio)[0]
+        nombre = cuerpo.split("  ")[0].lstrip("-> ").strip()
+        filas = re.search(r"rows=(\d+)", limpio)
+        real = re.search(r"actual time=[\d.]+\.\.\d+ rows=(\d+)", limpio)
+        tabla = None
+        # En un Bitmap Index Scan, lo que sigue a `on` es el indice, no la
+        # tabla: la tabla aparece un nivel mas abajo. Tomarlo como tabla
+        # daria "tabla=indice", que es un dato inventado.
+        if "Index Scan using" in cuerpo or "Seq Scan on" in cuerpo:
+            m = re.search(r"\bon (\w+)(?:\s+\w+)?\s*$", cuerpo)
+            tabla = m.group(1) if m else None
+        nodos.append({
+            "nodo": nombre,
+            "indice": extraer_indice(cuerpo),
+            "tabla": tabla,
+            "filas_estimadas": int(filas.group(1)) if filas else None,
+            "filas_reales": int(real.group(1)) if real else None,
+        })
     return nodos
 
 
