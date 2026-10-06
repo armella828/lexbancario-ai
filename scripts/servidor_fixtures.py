@@ -21,7 +21,10 @@ from fastapi.responses import HTMLResponse
 
 app = FastAPI(title="Servidor de fixtures para benchmark RAG")
 
-TAMANO_PALABRAS = 1200
+# ~12000 palabras producen paginas de unos 85 KB, dentro del rango de
+# 70-220 KB que fija la guia. Con documentos de 9 KB la descarga era casi
+# instantanea y el benchmark media el latido del loopback, no la red.
+TAMANO_PALABRAS = 12000
 LATENCIA_SEGUNDOS = 0.35
 
 TEMAS = [
@@ -100,6 +103,26 @@ def _html(titulo: str, organismo: str, tipo: str, cuerpo: str) -> str:
 </html>"""
 
 
+# Los documentos se generan una sola vez y se sirven desde ahi.
+#
+# Un sitio publico genera su HTML en su propio equipo: su CPU no esta
+# dentro del presupuesto de 2 vCPU que se esta midiendo. Regenerar 12000
+# palabras en cada request si la estaria, y el speedup publicado bajaria
+# por el coste del servidor simulado, no por el del pipeline. Memoizar
+# devuelve el coste de descarga al de red puro, que es lo que representa.
+_HTML_POR_DOC: dict = {}
+
+
+def _documento_html(n: int) -> str:
+    pagina = _HTML_POR_DOC.get(n)
+    if pagina is None:
+        titulo, organismo, tipo = TEMAS[n - 1]
+        cuerpo = _texto_legible(titulo, TAMANO_PALABRAS, semilla=n)
+        pagina = _html(titulo, organismo, tipo, cuerpo)
+        _HTML_POR_DOC[n] = pagina
+    return pagina
+
+
 @app.get("/salud")
 async def salud():
     return {"status": "ok", "documentos": len(TEMAS)}
@@ -109,10 +132,9 @@ async def salud():
 async def documento(n: int, latencia: float = LATENCIA_SEGUNDOS):
     if not 1 <= n <= len(TEMAS):
         return Response(status_code=404, content="Documento inexistente")
-    titulo, organismo, tipo = TEMAS[n - 1]
-    cuerpo = _texto_legible(titulo, TAMANO_PALABRAS, semilla=n)
+    pagina = _documento_html(n)
     await asyncio.sleep(latencia)
-    return HTMLResponse(_html(titulo, organismo, tipo, cuerpo))
+    return HTMLResponse(pagina)
 
 
 @app.get("/roto")
@@ -129,10 +151,15 @@ async def lento(segundos: float = 40.0):
 def main():
     import uvicorn
 
-    ap = argparse.ArgumentParser(description="Servidor de fixtures para el benchmark")
+    ap = argparse.ArgumentParser(description="Servidor de fixtures para benchmark")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8099)
     args = ap.parse_args()
+    # Se generan todos antes de aceptar conexiones: si se generaran bajo
+    # demanda, la primera ola de descargas pagaria el coste y esa replica
+    # quedaria mas lenta que las siguientes por una razon ajena al pipeline.
+    for n in range(1, len(TEMAS) + 1):
+        _documento_html(n)
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 

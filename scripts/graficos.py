@@ -65,9 +65,9 @@ def grafico_speedup(serie_a):
     ax1.plot(ps, ps, ":", color="#ccc", linewidth=1,
              label="escalado lineal ideal")
 
-    for p, real, techo_p in zip(ps, reales, techo):
-        if real and techo_p > 1.05:
-            ax1.annotate(f"{real / techo_p:.0%}", (p, real),
+    for p, real in zip(ps, reales):
+        if real and p > 1:
+            ax1.annotate(f"{real / p:.0%}", (p, real),
                          textcoords="offset points", xytext=(0, -14),
                          ha="center", fontsize=7, color="#555")
 
@@ -80,20 +80,22 @@ def grafico_speedup(serie_a):
     ax1.set_xlabel("procesos (p)")
     ax1.set_ylabel("speedup")
     ax1.set_title("Serie A: speedup medido vs techo de Amdahl\n"
-                  "(etiquetas = eficiencia)", fontsize=10)
+                  "(etiquetas = eficiencia = S_p / p)", fontsize=10)
     ax1.legend(fontsize=8, loc="upper left")
     ax1.grid(True, which="both", alpha=0.25)
     ax1.set_ylim(0.8, max(techo) * 2)
 
-    # Panel derecho: eficiencia, que es la lectura que mas importa.
-    ef = [r / t if t else 0 for r, t in zip(reales, techo)]
+    # Panel derecho: eficiencia = S_p / p, la definicion de la guia.
+    # El techo de Amdahl es otra pregunta ("cuanto daria un paralelismo
+    # perfecto"); mezclarlo aqui haria parecer mejor al sistema.
+    ef = [r / p if p else 0 for r, p in zip(reales, ps)]
     barras = ax2.bar([str(p) for p in ps], ef,
                      color=["#2e8b57" if e > 0.7 else
                             "#c98a2b" if e > 0.45 else "#b04a3f"
                             for e in ef])
     ax2.axhline(0.7, color="#999", linestyle="--", linewidth=1)
     ax2.set_ylim(0, 1.05)
-    ax2.set_ylabel("eficiencia = medido / techo")
+    ax2.set_ylabel("eficiencia = S_p / p")
     ax2.set_xlabel("procesos (p)")
     ax2.set_title("Eficiencia del paralelismo", fontsize=10)
     ax2.grid(True, axis="y", alpha=0.25)

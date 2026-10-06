@@ -38,12 +38,10 @@ services:
   scraper:
     build: .
     container_name: lexbancario_scraper
-    # Detras de un perfil a proposito: el scraper escribe en la base y
-    # consume cuota de embeddings, asi que no debe levantarse con cada
-    # `docker compose up`. Se lanza de forma consciente:
-    #     docker compose --profile scraper run --rm scraper
-    profiles:
-      - scraper
+    # Sin perfil: la guia pide que `docker compose up --build` levante
+    # backend, scraper y base conectada en un unico comando. Baja PDFs a
+    # disco y sale; los que ya existen los salta, asi que no consume
+    # cuota de embeddings ni reescribe nada.
     command: python scripts/descargar_asfi.py
     volumes:
       - .:/app
@@ -98,9 +96,12 @@ services:
       - BENCHMARK_BASE_URL=http://127.0.0.1:8099
     # Los fixtures se levantan en segundo plano y el benchmark espera a que
     # respondan (benchmark.py reintenta antes de abortar).
+    # 10 URLs: el minimo que pide la guia, y el mismo numero que usa la
+    # metodologia de referencia, para que las dos mediciones sean
+    # directamente comparables.
     command: >
       sh -c "python scripts/servidor_fixtures.py --host 127.0.0.1 --port 8099 &
-      sleep 4 && python scripts/benchmark.py --serie todas --urls 8 --replicas 5"
+      sleep 4 && python scripts/benchmark.py --serie todas --urls 10 --replicas 5"
     volumes:
       - .:/app
     env_file:

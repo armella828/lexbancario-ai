@@ -361,12 +361,20 @@ def generar_embeddings(
 
     faltantes = cache.faltan(textos)
     nuevos: Dict[str, list] = {}
-    for indice, lote in enumerate(lotes(faltantes, tamano_lote), start=1):
-        if al_progresar:
-            al_progresar(indice, lote)
-        for texto, vector in zip(lote, embedir_lote(lote, limitador, cliente_ai)):
-            nuevos[texto] = vector
-            cache.almacenar(texto, vector)
+    try:
+        for indice, lote in enumerate(lotes(faltantes, tamano_lote), start=1):
+            if al_progresar:
+                al_progresar(indice, lote)
+            for texto, vector in zip(lote,
+                                     embedir_lote(lote, limitador, cliente_ai)):
+                nuevos[texto] = vector
+                cache.almacenar(texto, vector)
+    except BaseException:
+        # Si el lote 90 de 93 choca con la cuota, lo generado en los 89
+        # anteriores ya es plata pagada: guardarlo antes de propagar hace
+        # que el siguiente intento empiece donde este y no en cero.
+        cache.guardar()
+        raise
 
     resueltos = []
     for texto in textos:

@@ -20,6 +20,9 @@ import pymupdf as fitz
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESULTADOS = os.path.join(RAIZ, "resultados")
 
+# Nombre del estudiante para la caratula. Un valor vacio oculta la linea.
+ESTUDIANTE = "Isaias Edmundo Isaias"
+
 
 def cargar_json(nombre):
     ruta = os.path.join(RESULTADOS, nombre)
@@ -109,6 +112,7 @@ def benchmark():
     res = datos.get("resultados", {})
     serie_a = res.get("serie_a")
     serie_b = res.get("serie_b")
+    serie_b_fria = res.get("serie_b_fria")
     if serie_a:
         base = serie_a["configuraciones"][0]["total"]["media"]
         frac = serie_a.get("fraccion_serial_medida", 0.0)
@@ -116,9 +120,35 @@ def benchmark():
             p = fila["procesos"]
             techo = 1.0 / (frac + (1.0 - frac) / p) if p else 1.0
             fila["techo"] = techo
-            fila["eficiencia"] = fila.get("speedup", 1.0) / techo
+            # Eficiencia = S_p / p, la formula que exige la guia. El techo
+            # de Amdahl se mantiene aparte: dividir por el techo daria
+            # otra magnitud y dejaria al paralelismo mejor de lo que esta.
+            fila["eficiencia"] = fila.get("speedup", 1.0) / p
+            fila["del_techo"] = fila.get("speedup", 1.0) / techo
             fila["velocidad_base"] = base / fila["total"]["media"]
-    return {"a": serie_a, "b": serie_b, "config": datos.get("config", {})}
+    return {"a": serie_a, "b": serie_b, "b_fria": serie_b_fria,
+            "config": datos.get("config", {})}
+
+
+def reparto(serie):
+    """Porcentaje de tiempo de cada fase en una pasada de Serie B.
+
+    Devuelve la lista de (fase, segundos, porcentaje) o None si la serie no
+    existe. El total se calcula sumando las fases, no con el campo
+    `total_segundos`: asi se comprueba que las cuatro cuadran y un valor
+    olvidado del JSON no desaparece del informe sin avisar.
+    """
+    if not serie or "una_pasada" not in serie:
+        return None
+    u = serie["una_pasada"]
+    fases = [("descarga", u.get("descarga", 0.0)),
+             ("chunking", u.get("chunking", 0.0)),
+             ("embeddings", u.get("embeddings", 0.0)),
+             ("inserción", u.get("insercion", 0.0))]
+    total = sum(v for _, v in fases)
+    if not total:
+        return None
+    return [(n, v, 100.0 * v / total) for n, v in fases]
 
 
 def cache_estado():
@@ -198,17 +228,24 @@ def construir_html():
                 f"<td class=n>{f['eficiencia']*100:.0f}%</td></tr>"
             )
 
-    filas_b = ""
-    if bm and bm["b"]:
-        u = bm["b"]["una_pasada"]
-        filas_b = (
-            f"<tr><td>descarga</td><td class=n>{u['descarga']:.3f}s</td></tr>"
-            f"<tr><td>chunking</td><td class=n>{u['chunking']:.3f}s</td></tr>"
-            f"<tr><td>embeddings (caché)</td><td class=n>{u['embeddings']:.3f}s</td></tr>"
-            f"<tr><td>inserción</td><td class=n>{u['insercion']:.3f}s</td></tr>"
-            f"<tr class=ttl><td>TOTAL</td><td class=n>"
-            f"{bm['b']['total_segundos']:.3f}s</td></tr>"
-        )
+    # Reparto de las cuatro fases, en las dos variantes de Serie B si
+    # estan. La fria es la que muestra cuanto pesa la API de terceros sin
+    # mitigacion; la calientada es el mismo pipeline con la cache.
+    filas_b, filas_bf = "", ""
+    rep_b, rep_bf = reparto(bm["b"]) if bm else None, reparto(bm["b_fria"]) if bm else None
+    for destino, rep in (("fria", rep_bf), ("calida", rep_b)):
+        if not rep:
+            continue
+        filas = "".join(
+            f"<tr><td>{n}</td><td class=n>{v:.3f} s</td>"
+            f"<td class=n>{pc:.1f} %</td></tr>" for n, v, pc in rep)
+        filas += (f"<tr class=ttl><td>total</td>"
+                  f"<td class=n>{sum(v for _, v, _ in rep):.3f} s</td>"
+                  f"<td class=n>100 %</td></tr>")
+        if destino == "fria":
+            filas_bf = filas
+        else:
+            filas_b = filas
 
     filas_ex = ""
     if ex:
@@ -223,6 +260,22 @@ def construir_html():
     n_cache = ca["n"] if ca else 0
     n_total = sum(co.values()) if co else 0
 
+    # Hits de la pasada caliente: fragmentos resueltos con cache frente a los
+    # que hubo que pedir a la API. En acierto perfecto calan 0 a la API y se
+    # lee HITS de la evidencia de los 120%.
+    bf_hits = "0/0"
+    if bm and bm["b"]:
+        fallidos = bm["b"].get("cache_fallidos")
+        bf_hits = f"{max(0, bm['b'].get('fragmentos', 0) - (fallidos or 0))}/{bm['b'].get('fragmentos', 0)}"
+
+    # Fila de Serie B: una de las dos variantes, o el aviso de cuota.
+    filas_b_visibles = (filas_bf or filas_b
+        or "<tr><td colspan=3>Serie B pendiente de cuota: la fase de "
+           "embeddings llama a la API y la cuota diaria del nivel gratuito "
+           "está agotada en el momento de generar este informe.</td></tr>")
+    b_titulo = ('Fases · pasada caliente' if filas_b and not filas_bf
+                else 'Fases · pasada en frío')
+
     # ------------------------------------------------------------- HTML
     return f"""<html><head><style>
 body {{ font-family: sans-serif; font-size: 8.7pt; line-height: 1.34;
@@ -234,6 +287,12 @@ h2 {{ font-size: 10.5pt; margin: 10pt 0 4pt 0; color: #0d2b45;
 h3 {{ font-size: 9.2pt; margin: 7pt 0 3pt 0; color: #1c3f5e; }}
 p  {{ margin: 2.5pt 0; text-align: justify; }}
 .sub {{ font-size: 9pt; color: #55606b; margin-bottom: 7pt; }}
+table.cab {{ width: 100%; border-collapse: collapse; margin: 0 0 8pt 0;
+    font-size: 8.6pt; }}
+table.cab td {{ border: .6pt solid #0d2b45; border-bottom: 2.4pt solid #0d2b45;
+    padding: 5pt 7pt; }}
+table.cab td.esc {{ width: 66%; background: #f4f7f9; }}
+table.cab td.dat {{ width: 34%; background: #e9f0f6; }}
 table {{ width: 100%; border-collapse: collapse; margin: 3.5pt 0 6pt 0;
          font-size: 8.0pt; }}
 th {{ background: #0d2b45; color: #fff; text-align: left;
@@ -267,8 +326,16 @@ li {{ margin: 1.6pt 0; }}
         border-top: .5pt solid #d4dae0; padding-top: 3pt; }}
 </style></head><body>
 
+<table class=cab><tr>
+<td class=esc>Universidad Autónoma Juan Misael Saracho<br>
+Facultad de Ingeniería de Recursos Naturales y Tecnología<br>
+Carrera de Ingeniería Informática</td>
+<td class=dat>Materia: <b>Sistemas Paralelos y Distribuidos</b><br>
+Docente: <b>Ing. Elias Cassal Baldiviezo</b>{f"<br>Estudiante: <b>{ESTUDIANTE}</b>" if ESTUDIANTE else ""}</td>
+</tr></table>
+
 <h1>Pipeline RAG multi-dominio con scraping concurrente y aislamiento vectorial</h1>
-<div class=sub>Asistente normativo ASFI / Banco Unión &middot;
+<div class=sub>Práctica de laboratorio &middot; lexbancario-ai &middot;
 pgvector 768 dims &middot; {n_total} fragmentos en 4 colecciones &middot;
 informe con todas las cifras leídas de <span class=mono>resultados/</span></div>
 
@@ -289,17 +356,60 @@ leer otra colección aunque el llamador lo intente.</p>
 {ai['fantasma'] if ai else 0} filas en colecciones inexistentes;
 el control negativo devuelve {control_txt} filas ajenas, lo que prueba que
 el test detectaría contaminación si existiera. En Docker limitado a
-2 vCPU, speedup de <b>{bm['a']['configuraciones'][3].get('speedup',0):.2f}×</b>
-a 8 procesos con <b>{bm['a']['configuraciones'][3]['eficiencia']*100:.0f}%</b>
-de eficiencia frente al techo de Amdahl. La caché de embeddings resuelve
-{n_cache} textos sin una sola petición a la API, y la fase de embeddings en
-la Serie B queda en {bm['b']['una_pasada']['embeddings']:.2f} s.</div>
-<h2>2. Arquitectura y aislamiento multi-tenant</h2>
+2 vCPU y con {bm['config'].get('urls',0)} URLs, speedup de
+<b>{bm['a']['configuraciones'][3].get('speedup',0):.2f}×</b> a 8 procesos
+(<b>{bm['a']['configuraciones'][3]['eficiencia']*100:.0f} %</b> de
+eficiencia = S<sub>p</sub>/p), capturando
+{bm['a']['configuraciones'][3]['del_techo']*100:.0f} % del techo de Amdahl
+que impone la inserción serial.</div>
+
+<h2 style="page-break-before: always">2. Diagrama arquitectónico del flujo concurrente</h2>
+<img src="resultados/diagrama_flujo.png" alt="Diagrama arquitectónico">
+<p class=pie>Las cuatro fases de la ingesta, la caché de embeddings, la API
+externa y el camino de consulta aislado por <span class=mono>coleccion_id</span>.
+Las fases 1 y 2 se paralelizan (hilos para E/S, procesos para cómputo); la
+fase 4 se ejecuta en serie y es la que fija el techo de Amdahl.</p>
+
+<div class=caja><b>Por qué hilos aquí y procesos allí.</b>
+La descarga es E/O-bound: los trabajadores esperan respuestas de red, así
+que <span class=mono>asyncio + httpx</span> con 8 solicitudes concurrentes
+es la elección adecuada y el GIL no importa. El troceado es cómputo puro
+sobre HTML, así que usa <span class=mono>ProcessPoolExecutor</span> con 8
+procesos: ejecutar trabajo Python en paralelo de verdad y no convivir con
+el GIL. La inserción se deja en serie porque mandar lotes de 200 filas
+secuencialmente evita carreras por el mismo identificador y reduce el
+impacto de un lote que falle.</div>
+
+<h2>3. Aislamiento multi-tenant y función RPC</h2>
 <p>La tabla <span class=mono>normativa_bancaria</span> es la única tabla
 vectorial y usa <b>colección como columna discriminadora</b>, no una tabla
 por dominio. Eso permite compartir índices y métricas, y obliga a que todo
 acceso pase por el filtro. Cada fila lleva
 <span class=mono>coleccion_id</span>, el fragmento y su vector.</p>
+
+<div class="caja"><b>La RPC <span class=mono>match_normativa_coleccion</span>.</b>
+Funciones esenciales de su definición SQL (en <span class=mono>scripts/schema.sql</span>):
+</div>
+<ul>
+<li><b>Parámetro de tenant obligatorio</b>
+(<span class=mono>p_coleccion_id VARCHAR</span>): la búsqueda no existe sin
+ese filtro. El <span class=mono>WHERE nb.coleccion_id = p_coleccion_id</span>
+se evalúa <i>antes</i> del orden por distancia.</li>
+<li><b>Distancia por coseno</b>
+(<span class=mono>nb.embedding &lt;=&gt; p_query_embedding</span>) con un
+umbral configurable (<span class=mono>match_threshold=-1.0</span> en el
+protocolo para no descartar nada por similitud).</li>
+<li><b>Top-N</b> (<span class=mono>LIMIT match_count</span>) sobre el
+resultado ya filtrado por la colección.</li>
+<li><b><span class=mono>SECURITY DEFINER</span> y privilegios recortados</b>:
+los roles <span class=mono>anon</span>/
+<span class=mono>authenticated</span> ejecutan la función pero no tocan la
+tabla directamente; la política de filas sigue viva dentro de la función.</li>
+</ul>
+<p>La aplicación (endpoint <span class=mono>/api/consultar</span>) solo puede
+recuperar vectores a través de esta función. El aislamiento queda, por tanto,
+en el motor: si mañana un cliente intentara consultar sin filtro, no existe
+ningún camino SQL que se lo permita.</p>
 
 <table class=par><tr><td>
 <h3>Distribución de los datos</h3>
@@ -330,7 +440,7 @@ consultas &middot; {ai['intrusiones'] if ai else 0} de otra colección &middot;
 {ai['tiempo'] if ai else 0} s en total.
 <span class=mono>[{'OK' if ai and ai['pass'] else '?'}]</span></div>
 
-<h2>3. Evidencia de índices con EXPLAIN</h2>
+<h2>4. Evidencia de índices con EXPLAIN</h2>
 <p>Se extrajo el plan de ejecución de las tres consultas relevantes. El dato
 que sostiene el aislamiento es que el filtro de colección se resuelve
 <b>antes</b> de ordenar por distancia, sobre un índice B-Tree, y no después
@@ -352,7 +462,7 @@ barrido secuencial porque el coste estimado de un índice aproximado supera
 el ahorro. El HNSW es capacidad para crecer, no una aceleración medida:
 afirmar lo contrario con estos datos sería incorrecto.</div>
 
-<h2 style="page-break-before: always">4. Benchmark de paralelismo (Serie A)</h2>
+<h2 style="page-break-before: always">5. Benchmark de paralelismo (Serie A)</h2>
 <p>Se midió el pipeline completo sin embeddings, con
 {bm['config'].get('urls',0)} URLs de un servidor de fixtures determinista y
 {bm['config'].get('replicas',0)} réplicas por configuración. La medición se
@@ -366,47 +476,70 @@ speedup irreproducible.</p>
 <th class=n>desv.</th><th class=n>speedup</th><th class=n>techo</th>
 <th class=n>efic.</th></tr>{filas_a}</table>
 <p class=pie>Fracción serial medida: <b>{frac*100:.1f}%</b> (fase de
-chunking). El techo es la ley de Amdahl con esa fracción; la eficiencia es
-speedup medido ÷ techo.</p>
+inserción, la única que no se paraleliza). El techo es la ley de Amdahl con
+esa fracción; la eficiencia es S<sub>p</sub>/p, la definición de la guía.</p>
 </td><td class=der>
 <img src="resultados/speedup_vs_amdahl.png" alt="speedup">
 </td></tr></table>
 
 <p>El speedup crece de forma sostenida hasta {bm['a']['configuraciones'][3].get('speedup',0):.2f}×
-a 8 procesos, pero la eficiencia cae de
-{bm['a']['configuraciones'][1]['eficiencia']*100:.0f}% a
-{bm['a']['configuraciones'][3]['eficiencia']*100:.0f}%. La lectura es que el
-cuello de botella deja de ser el cómputo y pasa a ser la coordinación: la
-fase de inserción se mantiene prácticamente constante
-(~{bm['a']['configuraciones'][3]['fases']['insercion']['media']:.2f} s) en
-todas las configuraciones porque es serial y no se paraleliza.</p>
+a 8 procesos (eficiencia {bm['a']['configuraciones'][3]['eficiencia']*100:.0f} % = S<sub>p</sub>/p),
+pero en todas las configuraciones se captura más del
+{bm['a']['configuraciones'][3]['del_techo']*100:.0f} % del techo de Amdahl. La
+lectura es la opuesta a un fallo de paralelismo: el sistema captura casi todo
+lo que permite la teoría, y el techo es bajo porque la fase de inserción
+<b>no se paraleliza</b> y ocupa el {frac*100:.0f} % del tiempo en la línea
+base. La descarga, en cambio, escala muy bien: de
+{bm['a']['configuraciones'][0]['fases']['descarga']['media']:.2f} s a
+{bm['a']['configuraciones'][3]['fases']['descarga']['media']:.2f} s
+(<b>{bm['a']['configuraciones'][0]['fases']['descarga']['media']/bm['a']['configuraciones'][3]['fases']['descarga']['media']:.2f}×</b>),
+porque es E/S pura. La inserción se mantiene plana
+(~{bm['a']['configuraciones'][3]['fases']['insercion']['media']:.2f} s en
+todas las configuraciones) porque los lotes de 200 se mandan uno tras otro
+y no existe competencia por la CPU de Postgres en el cliente.</p>
 
-<h2>5. Coste de embeddings: caché y Serie B</h2>
+<h2>6. Pipeline completo: caché, Serie B y el límite de la API</h2>
 <p>Los embeddings se cachean por hash SHA-256 de
 (modelo + dimensión + texto), así que repetir un fragmento no consume cuota
 ni latencia. El modelo es <span class=mono>gemini-embedding-001</span> con
 768 dimensiones y la caché tiene actualmente
 <b>{n_cache} vectores</b> ({(ca['bytes']/1048576):.1f} MB).</p>
 
+<div class=caja><b>Lo que hay detrás de los porcentajes.</b>
+La Serie B es el pipeline completo con embeddings. La diferencia entre la
+pasada en frío y la pasada caliente aísla exactamente el coste que la caché
+elimina: sin caché, esa fase llama a la API (latencia de red y reintentos),
+y con caché resuelve contra disco. El hash SHA-256 de
+(modelo + dimensión + texto) garantiza que el acierto es para el mismo
+fragmento, no un "parecido".</div>
+
 <table class=par><tr><td>
-<table><tr><th>Fase</th><th class=n>Tiempo</th></tr>{filas_b}</table>
+{b_titulo}
+<table><tr><th>Fase</th><th class=n>Tiempo</th><th class=n>% del total</th></tr>
+{filas_b_visibles}</table>
+<p class=pie>Los porcentajes se calculan de las cuatro fases del propio JSON;
+la Serie B fría es la que muestra cuánto pesa la API de terceros sin
+mitigación, y la variante caliente es el mismo pipeline reutilizando la
+caché.</p>
 </td><td class=der>
 <h3>Qué se comprueba</h3>
 <ul>
-<li><b>83/83 aciertos</b> de caché en la Serie B: cero peticiones a la API.
-La primera pasada, con la caché fría para esos textos, tuvo que pagar las
-83 peticiones; a partir de ahí el coste de embeddings es local.</li>
-<li><b>57 comprobaciones</b> del formato de lotes y backoff, y
-<b>10 de la inserción</b> por lotes de 200 filas, todas en verde.</li>
-<li>Sin caché, la Serie B mediría la cuota de la API, que es justo lo que no
-se quiere medir; el script aborta si la caché está vacía.</li>
+<li><b>Aciertos de caché</b>: {bf_hits if filas_b or filas_bf else '—'} fragmentos
+resueltos sin llamar a la API (la pasada fría paga la API y guarda el
+vector; las siguientes lo leen de disco).</li>
+<li><b>57 comprobaciones</b> del formato de lotes, cadencia y backoff ante
+429, y <b>10 de la inserción</b> por lotes de 200 filas, todas en verde.</li>
+<li>Con la caché vacía el script aborta y explica cómo calentarla; sin esa
+guardia, la Serie B mediría esperas de reintentos en lugar de concurrencia.</li>
 </ul>
 </td></tr></table>
 
-<h2>6. Reproducibilidad y conclusiones</h2>
+<h2>7. Reproducibilidad, conclusiones y escalabilidad</h2>
 <table class=par><tr><td>
 <h3>Cómo se reproduce</h3>
 <ul>
+<li><span class=mono>docker compose up --build</span>
+&mdash; levanta backend, scraper y base de datos.</li>
 <li><span class=mono>docker compose --profile bench run --rm bench</span>
 &mdash; Serie A y B dentro de 2 vCPU.</li>
 <li><span class=mono>python scripts/test_aislamiento_120.py</span>
@@ -414,7 +547,7 @@ se quiere medir; el script aborta si la caché está vacía.</li>
 <li><span class=mono>python scripts/explicar_indices.py</span>
 &mdash; planes EXPLAIN guardados en JSON.</li>
 <li><span class=mono>python scripts/informe_pdf.py</span>
-&mdash; regenera este documento.</li>
+&mdash; regenera este documento, siempre desde <span class=mono>resultados/</span>.</li>
 </ul>
 </td><td class=der>
 <h3>Conclusiones</h3>
@@ -423,18 +556,30 @@ se quiere medir; el script aborta si la caché está vacía.</li>
 prueba que el test mediría la falla.</li>
 <li>El filtro de tenant, no el índice vectorial, es lo que hace correcta y
 rápida la consulta.</li>
-<li>El paralelismo rinde hasta el punto en que la inserción serial domina;
-más procesos no ayudan.</li>
+<li>El paralelismo captura casi todo el techo de Amdahl; el cuello es la
+inserción serial y más procesos no lo cambian.</li>
 <li>La caché convierte un coste recurrente de cuota en una tabla local.</li>
 </ul>
 </td></tr></table>
 
+<div class="caja"><b>Escalabilidad frente a APIs de terceros.</b>
+La prueba más evidente del límite externo ocurrió durante este trabajo: al
+calentar la caché para el corpus nuevo (las 10 URLs de la Serie A), la API
+gratuita respondió <span class=mono>429 RESOURCE_EXHAUSTED</span> con
+<span class=mono>retryDelay=25789</span> s, bloqueando la Serie B durante
+horas. La lección es de diseño: <b>el techo de Amdahl mide el paralelismo de
+la propia máquina, pero no impone un límite a APIs externas</b>. Con el nivel
+gratuito (limitado en peticiones por hora), el rendimiento real del pipeline
+queda acotado por esa cuota y no por los 2 vCPU; la caché es exactamente lo
+que devuelve el problema al dominio local, donde Amdahl sí aplica.</div>
+
 <div class=aviso><b>Límites del trabajo.</b> La fracción serial se midió
-sobre el chunking y no sobre el total de la carga, así que el techo de
-Amdahl es optimista. Las mediciones de EXPLAIN varían entre corridas
-(run-to-run), por lo que se reporta el valor de la evidencia guardada y no
-una cifra exacta. Los datos provienen de documentos públicos de ASFI y no
-constituyen asesoría normativa.</div>
+sobre la fase de inserción de la Serie A (sin embeddings), así que el techo
+de Amdahl describe el pipeline de ingesta local, no una garantía sobre el
+pipeline completo cuando interviene la API. Las mediciones de EXPLAIN varían
+entre corridas (run-to-run), por lo que se reporta el valor de la evidencia
+guardada y no una cifra exacta. Los datos provienen de documentos públicos
+de ASFI y no constituyen asesoría normativa.</div>
 
 </body></html>"""
 
@@ -443,7 +588,7 @@ def generar(salida):
     html = construir_html()
     story = fitz.Story(html=html, archive=fitz.Archive(RAIZ))
     mb = fitz.paper_rect("a4")
-    donde = mb + (36, 32, -36, -32)
+    donde = mb + (36, 26, -36, -26)
     writer = fitz.DocumentWriter(salida)
     paginas = 0
     mas = 1
