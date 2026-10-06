@@ -35,6 +35,62 @@ services:
     networks:
       - rag_net
 
+  scraper:
+    build: .
+    container_name: lexbancario_scraper
+    # Detras de un perfil a proposito: el scraper escribe en la base y
+    # consume cuota de embeddings, asi que no debe levantarse con cada
+    # `docker compose up`. Se lanza de forma consciente:
+    #     docker compose --profile scraper run --rm scraper
+    profiles:
+      - scraper
+    command: python scripts/descargar_asfi.py
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    networks:
+      - rag_net
+
+  bench:
+    build: .
+    container_name: lexbancario_bench
+    # Detras de un perfil: el benchmark inserta y borra filas, y con la
+    # cuota de embeddings agotada cada intento real es un request que se
+    # pierde. Se lanza de forma consciente:
+    #     docker compose --profile bench up -d
+    profiles:
+      - bench
+    command: >
+      python scripts/servidor_fixtures.py --host 0.0.0.0 --port 8099
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    # Tope de CPU para que el speedup medido sea reproducible en un equipo
+    # de 2 vCPU y no dependa de cuantos nucleos tenga la maquina.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+    networks:
+      - bench_net
+
 networks:
   rag_net:
+    driver: bridge
+
+  # Red de medicion: aislada y con tope de CPU.
+  #
+  # El limite de 2 CPUs no es decorativo. Medir el paralelismo sobre las 24
+  # vCPU de esta maquina daria un speedup que no se puede reproducir en el
+  # equipo donde se evalua, y ademas camufla el costo real de coordinacion.
+  # El contenedor `bench` levanta los fixtures bajo esta red:
+  #     docker compose --profile bench up -d
+  # y el benchmark corre desde el host contra ese puerto.
+  bench_net:
     driver: bridge
